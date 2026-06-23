@@ -1,0 +1,114 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * proxy3x 全局样式。主题 token 在 tailwind.config.ts，与 stitch 参考 UI 同款。
+ * 这里定义：图标字体、玻璃面板复用类、背景辉光、滚动条。
+ */
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-on-background antialiased;
+    font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+}
+
+@layer components {
+  /* 玻璃面板：参考图 .glass-panel —— 半透明填充 + 模糊 + 低透明描边 */
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(66, 70, 86, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+  /* hover 时蓝色霓虹描边 */
+  .neon-border-hover:hover {
+    border-color: rgba(0, 102, 255, 0.5);
+    box-shadow: 0 4px 24px rgba(0, 102, 255, 0.15);
+  }
+  /* 主操作按钮：蓝→绿渐变 */
+  .btn-gradient {
+    @apply bg-gradient-to-br from-primary-container to-secondary-fixed text-on-primary-container font-semibold;
+  }
+  /* 统一表单控件：暗底 + 描边，聚焦时蓝色辉光。input/select/textarea 复用 */
+  .control {
+    @apply w-full bg-surface-container-lowest/60 border border-outline-variant/30 rounded-lg px-4 text-on-surface
+      text-body-md placeholder:text-outline transition-colors
+      focus:outline-none focus:border-primary/60 focus:bg-surface-container-lowest;
+    height: 44px;
+  }
+  textarea.control {
+    height: auto;
+    @apply py-3 font-mono text-code-xs leading-5;
+  }
+  select.control {
+    @apply appearance-none cursor-pointer pr-9;
+  }
+  /* 暗色主题下让原生日期/时间选择器（datetime-local/date）的日历图标与弹层可见可用 */
+  input[type='datetime-local'].control,
+  input[type='date'].control,
+  input[type='time'].control {
+    color-scheme: dark;
+    cursor: pointer;
+  }
+  input[type='datetime-local'].control::-webkit-calendar-picker-indicator,
+  input[type='date'].control::-webkit-calendar-picker-indicator,
+  input[type='time'].control::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.7;
+    filter: invert(1);
+    transition: opacity 0.15s;
+  }
+  input[type='datetime-local'].control::-webkit-calendar-picker-indicator:hover,
+  input[type='date'].control::-webkit-calendar-picker-indicator:hover,
+  input[type='time'].control::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+  }
+}
+
+/* 背景辉光（命令中心氛围） */
+.bg-glow::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(40% 40% at 0% 0%, rgba(0, 102, 255, 0.06), transparent 70%),
+    radial-gradient(30% 30% at 100% 100%, rgba(36, 255, 205, 0.05), transparent 70%);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(66, 70, 86, 0.5);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(140, 144, 161, 0.6);
+}

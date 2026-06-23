@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output (frontend is rebuilt from web/ via `npm run build`)
+web/dist/
+server/frontend/assets/
+
+# Runtime data & secrets — NEVER commit
+**/data/manager.db
+**/*.db
+**/manager-credentials.json
+**/manager-credentials.txt
+
+# OS / editor
+.DS_Store
+*.log
+__pycache__/
+*.pyc
+.env.local
+.env.*.local

@@ -1,0 +1,260 @@
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { toast } from 'vue-sonner'
+import { useDashboardStore } from '@/stores/dashboard'
+import { usePolling } from '@/composables/usePolling'
+import type { Upstream } from '@/types/dashboard'
+import { ApiError } from '@/api/errors'
+import AppShell from '@/components/layout/AppShell.vue'
+import Button from '@/components/ui/Button.vue'
+import Icon from '@/components/ui/Icon.vue'
+import Pagination from '@/components/ui/Pagination.vue'
+import UpstreamCard from '@/components/domain/UpstreamCard.vue'
+import UpstreamFormDialog from '@/components/domain/dialogs/UpstreamFormDialog.vue'
+import UpstreamDetailDialog from '@/components/domain/dialogs/UpstreamDetailDialog.vue'
+import ConfirmDialog from '@/components/domain/dialogs/ConfirmDialog.vue'
+
+/**
+ * 家宽池页（对应 stitch proxy3x_4）。卡片网格 + 顶部在线/异常统计 + 新增家宽。
+ * 检测/编辑/删除走 store（调接口后 refresh）。
+ */
+const store = useDashboardStore()
+usePolling(() => store.refresh(), 15000)
+
+// 搜索：按备注 / 名称(IP) / 分配对象 过滤
+const keyword = ref('')
+const filteredUpstreams = computed(() => {
+  const k = keyword.value.trim().toLowerCase()
+  if (!k) return store.upstreams
+  return store.upstreams.filter(
+    (u) =>
+      (u.remark || '').toLowerCase().includes(k) ||
+      (u.host || '').toLowerCase().includes(k) ||
+      (u.assigned_to || '').toLowerCase().includes(k),
+  )
+})
+
+// 分页：默认每页 8 个，可调（基于过滤后结果）
+const page = ref(1)
+const pageSize = ref(8)
+const pagedUpstreams = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  return filteredUpstreams.value.slice(start, start + pageSize.value)
+})
+watch(keyword, () => {
+  page.value = 1
+})
+watch([() => filteredUpstreams.value.length, pageSize], () => {
+  const tp = Math.max(1, Math.ceil(filteredUpstreams.value.length / pageSize.value))
+  if (page.value > tp) page.value = tp
+})
+
+const formOpen = ref(false)
+const editing = ref<Upstream | null>(null)
+const formRef = ref<InstanceType<typeof UpstreamFormDialog> | null>(null)
+const submitting = ref(false)
+const checkingId = ref<number | null>(null)
+
+const confirmOpen = ref(false)
+const removing = ref<Upstream | null>(null)
+const removingBusy = ref(false)
+
+// 查看详情
+const detailOpen = ref(false)
+const viewing = ref<Upstream | null>(null)
+function openView(u: Upstream) {
+  viewing.value = u
+  detailOpen.value = true
+}
+
+// 一键检测（当前筛选结果，限制并发）
+const checkingAll = ref(false)
+const checkProgress = ref({ done: 0, total: 0 })
+async function onCheckAll() {
+  const list = filteredUpstreams.value.slice()
+  if (!list.length || checkingAll.value) return
+  checkingAll.value = true
+  checkProgress.value = { done: 0, total: list.length }
+  let ok = 0
+  let fail = 0
+  const concurrency = 4
+  let cursor = 0
+  async function worker() {
+    while (cursor < list.length) {
+      const u = list[cursor++]
+      try {
+        const r = await store.checkUpstream(u.id)
+        r.ok ? ok++ : fail++
+      } catch {
+        fail++
+      } finally {
+        checkProgress.value.done++
+      }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, list.length) }, () => worker()))
+    toast.success(`检测完成：可用 ${ok}，失败 ${fail}`)
+  } finally {
+    checkingAll.value = false
+  }
+}
+
+function openCreate() {
+  editing.value = null
+  formOpen.value = true
+}
+function openEdit(u: Upstream) {
+  editing.value = u
+  formOpen.value = true
+}
+
+async function onSubmit(payload: { line: string; remark: string; quota_gb: number }) {
+  submitting.value = true
+  try {
+    if (editing.value) {
+      await store.updateUpstream(editing.value.id, { remark: payload.remark, quota_gb: payload.quota_gb })
+      toast.success('已保存家宽')
+    } else {
+      await store.createUpstream({ line: payload.line, remark: payload.remark, quota_gb: payload.quota_gb })
+      toast.success('家宽已加入池子')
+    }
+    formOpen.value = false
+  } catch (e) {
+    formRef.value?.setError(e instanceof ApiError ? e.message : '操作失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function onCheck(u: Upstream) {
+  checkingId.value = u.id
+  try {
+    const r = await store.checkUpstream(u.id)
+    r.ok ? toast.success(r.message || '检测完成') : toast.error(r.message || '检测失败')
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '检测失败')
+  } finally {
+    checkingId.value = null
+  }
+}
+
+function askRemove(u: Upstream) {
+  removing.value = u
+  confirmOpen.value = true
+}
+async function onRemove() {
+  if (!removing.value) return
+  removingBusy.value = true
+  try {
+    await store.deleteUpstream(removing.value.id)
+    toast.success('已删除家宽')
+    confirmOpen.value = false
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '删除失败')
+  } finally {
+    removingBusy.value = false
+  }
+}
+</script>
+
+<template>
+  <AppShell title="家宽池配置" subtitle="管理和监控您的家庭宽带代理节点。">
+    <template #actions>
+      <Button
+        variant="ghost"
+        :loading="checkingAll"
+        :disabled="!filteredUpstreams.length"
+        @click="onCheckAll"
+      >
+        <Icon name="network_ping" :size="18" />
+        {{ checkingAll ? `检测中 ${checkProgress.done}/${checkProgress.total}` : '一键检测' }}
+      </Button>
+      <Button variant="primary" @click="openCreate">
+        <Icon name="add" :size="18" />新增家宽
+      </Button>
+    </template>
+
+    <!-- 统计 -->
+    <div class="flex gap-4">
+      <div class="glass-panel px-4 py-2 rounded-lg flex items-center gap-3">
+        <div class="w-2 h-2 rounded-full bg-secondary-fixed shadow-[0_0_8px_rgba(36,255,205,0.8)]"></div>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">
+          在线: <strong class="text-on-surface">{{ store.upstreamOnline }}</strong>
+        </span>
+      </div>
+      <div class="glass-panel px-4 py-2 rounded-lg flex items-center gap-3">
+        <div class="w-2 h-2 rounded-full bg-error shadow-[0_0_8px_rgba(255,180,171,0.8)]"></div>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">
+          异常: <strong class="text-on-surface">{{ store.upstreamError }}</strong>
+        </span>
+      </div>
+    </div>
+
+    <!-- 搜索 -->
+    <div v-if="store.upstreams.length" class="flex items-center gap-3 flex-wrap shrink-0">
+      <div class="relative w-72 max-w-full">
+        <Icon name="search" :size="18" class="absolute left-3 top-1/2 -translate-y-1/2 text-outline" />
+        <input v-model="keyword" class="control pl-9" placeholder="搜索备注 / 名称(IP) / 分配对象…" />
+      </div>
+      <span class="ml-auto font-label-sm text-label-sm text-outline">
+        共 {{ filteredUpstreams.length }} / {{ store.upstreams.length }} 个
+      </span>
+    </div>
+
+    <!-- 卡片网格 -->
+    <template v-if="filteredUpstreams.length">
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-panel-gap">
+        <UpstreamCard
+          v-for="u in pagedUpstreams"
+          :key="u.id"
+          :item="u"
+          :busy="checkingId === u.id || checkingAll"
+          @check="onCheck(u)"
+          @edit="openEdit(u)"
+          @remove="askRemove(u)"
+          @view="openView(u)"
+        />
+      </div>
+
+      <!-- 分页 -->
+      <Pagination
+        v-model:page="page"
+        v-model:page-size="pageSize"
+        :total="filteredUpstreams.length"
+        :page-size-options="[8, 16, 32, 64]"
+      />
+    </template>
+    <!-- 搜索无结果 -->
+    <div
+      v-else-if="store.upstreams.length"
+      class="glass-panel rounded-xl py-16 flex flex-col items-center gap-3 text-outline"
+    >
+      <Icon name="search_off" :size="40" />
+      <p class="font-body-md text-sm">没有匹配「{{ keyword }}」的家宽。</p>
+    </div>
+    <!-- 空池 -->
+    <div v-else class="glass-panel rounded-xl py-16 flex flex-col items-center gap-3 text-outline">
+      <Icon name="lan" :size="40" />
+      <p class="font-body-md text-sm">家宽池还是空的，点击右上角「新增家宽」添加节点。</p>
+    </div>
+
+    <UpstreamFormDialog
+      ref="formRef"
+      :open="formOpen"
+      :editing="editing"
+      :busy="submitting"
+      @close="formOpen = false"
+      @submit="onSubmit"
+    />
+    <UpstreamDetailDialog :open="detailOpen" :item="viewing" @close="detailOpen = false" />
+    <ConfirmDialog
+      :open="confirmOpen"
+      title="删除家宽"
+      :message="`确定删除家宽「${removing?.remark || removing?.host}」？绑定它的套餐将解绑并刷新路由。`"
+      :busy="removingBusy"
+      @close="confirmOpen = false"
+      @confirm="onRemove"
+    />
+  </AppShell>
+</template>
