@@ -23,15 +23,21 @@ usePolling(() => store.refresh(), 15000)
 
 // 搜索：按备注 / 名称(IP) / 分配对象 过滤
 const keyword = ref('')
+const statusFilter = ref<'valid' | 'invalid' | 'all'>('valid')
 const filteredUpstreams = computed(() => {
   const k = keyword.value.trim().toLowerCase()
-  if (!k) return store.upstreams
-  return store.upstreams.filter(
-    (u) =>
+  return store.upstreams.filter((u) => {
+    const matchStatus =
+      statusFilter.value === 'all' ||
+      (statusFilter.value === 'valid' && !u.expired && u.status !== '不可用') ||
+      (statusFilter.value === 'invalid' && (u.expired || u.status === '不可用'))
+    const matchKeyword =
+      !k ||
       (u.remark || '').toLowerCase().includes(k) ||
       (u.host || '').toLowerCase().includes(k) ||
-      (u.assigned_to || '').toLowerCase().includes(k),
-  )
+      (u.assigned_to || '').toLowerCase().includes(k)
+    return matchStatus && matchKeyword
+  })
 })
 
 // 分页：默认每页 8 个，可调（基于过滤后结果）
@@ -41,7 +47,7 @@ const pagedUpstreams = computed(() => {
   const start = (page.value - 1) * pageSize.value
   return filteredUpstreams.value.slice(start, start + pageSize.value)
 })
-watch(keyword, () => {
+watch([keyword, statusFilter], () => {
   page.value = 1
 })
 watch([() => filteredUpstreams.value.length, pageSize], () => {
@@ -109,14 +115,23 @@ function openEdit(u: Upstream) {
   formOpen.value = true
 }
 
-async function onSubmit(payload: { line: string; remark: string; quota_gb: number }) {
+async function onSubmit(payload: { line: string; remark: string; quota_gb: number; expires_at: string }) {
   submitting.value = true
   try {
     if (editing.value) {
-      await store.updateUpstream(editing.value.id, { remark: payload.remark, quota_gb: payload.quota_gb })
+      await store.updateUpstream(editing.value.id, {
+        remark: payload.remark,
+        quota_gb: payload.quota_gb,
+        expires_at: payload.expires_at,
+      })
       toast.success('已保存 SOCKS5')
     } else {
-      await store.createUpstream({ line: payload.line, remark: payload.remark, quota_gb: payload.quota_gb })
+      await store.createUpstream({
+        line: payload.line,
+        remark: payload.remark,
+        quota_gb: payload.quota_gb,
+        expires_at: payload.expires_at,
+      })
       toast.success('SOCKS5 已保存')
     }
     formOpen.value = false
@@ -197,6 +212,25 @@ async function onRemove() {
         <Icon name="search" :size="18" class="absolute left-3 top-1/2 -translate-y-1/2 text-outline" />
         <input v-model="keyword" class="control pl-9" placeholder="搜索备注 / IP / 分配对象…" />
       </div>
+      <div class="flex items-center gap-1 glass-panel rounded-lg p-1">
+        <button
+          v-for="opt in [
+            { v: 'valid', t: '有效' },
+            { v: 'invalid', t: '无效' },
+            { v: 'all', t: '全部' },
+          ]"
+          :key="opt.v"
+          class="px-3 h-8 rounded text-sm font-label-sm transition-colors"
+          :class="
+            statusFilter === opt.v
+              ? 'bg-primary-container/30 text-secondary-fixed-dim'
+              : 'text-on-surface-variant hover:text-on-surface'
+          "
+          @click="statusFilter = opt.v as typeof statusFilter"
+        >
+          {{ opt.t }}
+        </button>
+      </div>
       <span class="ml-auto font-label-sm text-label-sm text-outline">
         共 {{ filteredUpstreams.length }} / {{ store.upstreams.length }} 个
       </span>
@@ -231,7 +265,7 @@ async function onRemove() {
       class="glass-panel rounded-xl py-16 flex flex-col items-center gap-3 text-outline"
     >
       <Icon name="search_off" :size="40" />
-      <p class="font-body-md text-sm">没有匹配「{{ keyword }}」的 SOCKS5。</p>
+      <p class="font-body-md text-sm">{{ keyword ? `没有匹配「${keyword}」的 SOCKS5。` : '当前筛选下没有 SOCKS5。' }}</p>
     </div>
     <!-- 空池 -->
     <div v-else class="glass-panel rounded-xl py-16 flex flex-col items-center gap-3 text-outline">

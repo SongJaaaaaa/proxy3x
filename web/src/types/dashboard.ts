@@ -58,6 +58,9 @@ export interface Upstream {
   quota_gb: number // 0 = 未设额度
   quota_bytes: number
   usage_percent: number | null // null = 未设额度，前端不画进度
+  expired: boolean
+  expires_at: number
+  expires_at_text: string
 }
 
 /** SOCKS5 完整明文信息（/api/upstreams/{id}/reveal，账号密码未遮罩） */
@@ -71,6 +74,8 @@ export interface UpstreamReveal {
   remark: string
   assigned_to: string
   status: string
+  expires_at: number
+  expires_at_text: string
   uri: string // 拼好的连接串，如 socks5://user:pass@host:port
   line: string // IP:端口:账号:密码
 }
@@ -118,6 +123,7 @@ export interface CreateUpstreamBody {
   remark?: string
   assigned_to?: string
   quota_gb?: number
+  expires_at?: string | number | null
 }
 
 /** 编辑 SOCKS5 入参 */
@@ -125,4 +131,5 @@ export interface UpdateUpstreamBody {
   remark?: string
   assigned_to?: string
   quota_gb?: number
+  expires_at?: string | number | null
 }

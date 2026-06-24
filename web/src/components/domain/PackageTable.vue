@@ -23,7 +23,8 @@ const emit = defineEmits<{
 function upstreamName(id: number | null) {
   if (!id) return '默认 SOCKS5'
   const u = props.upstreams.find((x) => x.id === id)
-  return u ? u.remark || u.host : '默认 SOCKS5'
+  if (!u) return '默认 SOCKS5'
+  return `${u.remark || u.host}${u.expired ? '（已到期）' : ''}`
 }
 function onBind(pkg: Package, e: Event) {
   const v = (e.target as HTMLSelectElement).value

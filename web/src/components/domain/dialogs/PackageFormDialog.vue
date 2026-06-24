@@ -114,7 +114,7 @@ function submit() {
         <select v-model="form.upstream_id" class="control">
           <option :value="null">默认 SOCKS5</option>
           <option v-for="u in upstreams" :key="u.id" :value="u.id">
-            {{ u.remark || u.host }} ({{ u.protocol }})
+            {{ u.remark || u.host }} ({{ u.protocol }}{{ u.expired ? ' / 已到期' : '' }})
           </option>
         </select>
       </Field>

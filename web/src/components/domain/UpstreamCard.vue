@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Upstream } from '@/types/dashboard'
-import { gb } from '@/lib/format'
+import { fromUnix, gb } from '@/lib/format'
 import Icon from '@/components/ui/Icon.vue'
 import Badge from '@/components/ui/Badge.vue'
 import ProgressBar from '@/components/ui/ProgressBar.vue'
@@ -19,7 +19,7 @@ const available = computed(() => props.item.status === '可用')
 const failed = computed(() => props.item.status === '不可用')
 
 const protoTone = computed(() => (props.item.protocol.toLowerCase().includes('socks') ? 'purple' : 'blue'))
-const statusTone = computed(() => (available.value ? 'green' : failed.value ? 'red' : 'gray'))
+const statusTone = computed(() => (props.item.expired || failed.value ? 'red' : available.value ? 'green' : 'gray'))
 
 const hasQuota = computed(() => props.item.usage_percent !== null)
 const usageText = computed(() =>
@@ -27,13 +27,14 @@ const usageText = computed(() =>
     ? `${gb(props.item.used_gb, 1)} / ${gb(props.item.quota_gb, 0)}`
     : `${gb(props.item.used_gb, 1)} / 未设额度`,
 )
-const dimmed = computed(() => failed.value || props.item.status === '未检测')
+const dimmed = computed(() => props.item.expired || failed.value || props.item.status === '未检测')
+const expireText = computed(() => props.item.expires_at_text || fromUnix(props.item.expires_at))
 </script>
 
 <template>
   <div
     class="glass-panel rounded-xl p-5 flex flex-col gap-4 relative group transition-all duration-300"
-    :class="failed ? 'hover:border-error/50' : 'neon-border-hover'"
+    :class="props.item.expired || failed ? 'hover:border-error/50' : 'neon-border-hover'"
   >
     <!-- 头部 -->
     <div class="flex justify-between items-start">
@@ -45,7 +46,7 @@ const dimmed = computed(() => failed.value || props.item.status === '未检测')
       </div>
       <div class="flex flex-col items-end gap-1.5 shrink-0">
         <Badge :tone="protoTone">{{ item.protocol }}</Badge>
-        <Badge :tone="statusTone" dot :pulse="available">{{ item.status }}</Badge>
+        <Badge :tone="statusTone" dot :pulse="available && !item.expired">{{ item.expired ? '已到期' : item.status }}</Badge>
       </div>
     </div>
 
@@ -57,6 +58,20 @@ const dimmed = computed(() => failed.value || props.item.status === '未检测')
       <Icon name="badge" :size="16" class="text-outline" />
       <span class="font-code-xs text-code-xs text-on-surface-variant font-mono truncate">
         {{ item.username || '—' }}<template v-if="item.password"> : {{ item.password }}</template>
+      </span>
+    </div>
+
+    <!-- 到期时间 -->
+    <div
+      class="bg-surface-container-lowest/40 rounded-md p-2 flex items-center gap-2 border border-outline-variant/20"
+      :class="{ 'opacity-70 border-error/20': dimmed }"
+    >
+      <Icon name="event_busy" :size="16" :class="item.expired ? 'text-error' : 'text-outline'" />
+      <span
+        class="font-code-xs text-code-xs truncate"
+        :class="item.expired ? 'text-error' : 'text-on-surface-variant'"
+      >
+        到期 {{ expireText }}
       </span>
     </div>
 

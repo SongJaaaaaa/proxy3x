@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime
 from http import cookies
 from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +46,7 @@ OUTBOUND_TEST_URL = "https://www.google.com/generate_204"
 GB = 1024 * 1024 * 1024
 SESSION_MAX_AGE = 86400
 DEFAULT_PACKAGE_EXPIRE_SECONDS = 30 * 86400
+DEFAULT_UPSTREAM_EXPIRE_SECONDS = 30 * 86400
 DEFAULT_PACKAGE_TOTAL_GB = 500
 DEFAULT_NODE_NAME = "🇺🇸 住宅家宽"
 LEGACY_NODE_NAMES = {"高速节点", "高速流量"}
@@ -88,18 +90,49 @@ def default_expires_at(base=None):
     return int(base or now()) + DEFAULT_PACKAGE_EXPIRE_SECONDS
 
 
-def parse_expires_at(value, base=None):
+def default_upstream_expires_at(base=None):
+    return int(base or now()) + DEFAULT_UPSTREAM_EXPIRE_SECONDS
+
+
+def parse_datetime_value(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except ValueError:
+                pass
     try:
         ts = int(float(value or 0))
     except (TypeError, ValueError):
-        ts = 0
+        return 0
     if ts > 100000000000:
         ts = ts // 1000
+    return ts
+
+
+def parse_expires_at(value, base=None):
+    ts = parse_datetime_value(value)
     return ts if ts > 0 else default_expires_at(base)
+
+
+def parse_upstream_expires_at(value, base=None):
+    ts = parse_datetime_value(value)
+    return ts if ts > 0 else default_upstream_expires_at(base)
 
 
 def package_is_expired(package, at=None):
     expires_at = int(package["expires_at"] or 0)
+    return bool(expires_at and expires_at <= int(at or now()))
+
+
+def upstream_is_expired(upstream, at=None):
+    try:
+        expires_at = int(upstream["expires_at"] or 0)
+    except (KeyError, TypeError, ValueError):
+        expires_at = 0
     return bool(expires_at and expires_at <= int(at or now()))
 
 
@@ -204,6 +237,16 @@ def init_db():
         upstream_columns = {row["name"] for row in con.execute("PRAGMA table_info(upstreams)").fetchall()}
         if "quota_gb" not in upstream_columns:
             con.execute("ALTER TABLE upstreams ADD COLUMN quota_gb REAL NOT NULL DEFAULT 0")
+        if "expires_at" not in upstream_columns:
+            con.execute("ALTER TABLE upstreams ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0")
+        con.execute(
+            """
+            UPDATE upstreams
+            SET expires_at = ?
+            WHERE expires_at IS NULL OR expires_at = 0
+            """,
+            (default_upstream_expires_at(),),
+        )
 
 
 def log_event(level, message):
@@ -828,6 +871,8 @@ def upstream_public(row):
     quota_gb = float(item.get("quota_gb") or 0)
     item["quota_gb"] = quota_gb
     item["quota_bytes"] = bytes_from_gb(quota_gb)
+    item["expired"] = upstream_is_expired(item)
+    item["expires_at_text"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(item["expires_at"] or 0))) if item.get("expires_at") else ""
     return item
 
 
@@ -966,7 +1011,7 @@ def apply_xray_routes():
     with connect_manager_db() as con:
         packages = con.execute(
             """
-            SELECT p.*, u.protocol, u.host, u.port AS upstream_port, u.username, u.password
+            SELECT p.*, u.protocol, u.host, u.port AS upstream_port, u.username, u.password, u.expires_at AS upstream_expires_at
             FROM packages p
             LEFT JOIN upstreams u ON u.id = p.upstream_id
             ORDER BY p.id
@@ -1016,11 +1061,13 @@ def apply_xray_routes():
         kept_rules.append(rule)
 
     new_rules = []
+    current = now()
     for p in packages:
         ports = [port for port in (p["direct_port"], p["residential_port"]) if port]
         if not ports:
             continue
-        if not p["upstream_id"]:
+        upstream_expired = bool(p["upstream_expires_at"] and int(p["upstream_expires_at"]) <= current)
+        if not p["upstream_id"] or upstream_expired:
             new_rules.append(
                 {
                     "type": "field",
@@ -1307,11 +1354,38 @@ def disable_expired_packages(con, packages):
     return changed
 
 
+def disable_expired_upstreams(con):
+    changed = 0
+    current = now()
+    rows = con.execute(
+        """
+        SELECT *
+        FROM upstreams
+        WHERE expires_at > 0 AND expires_at <= ?
+          AND (status != '不可用' OR last_error != 'SOCKS5: 已到期')
+        ORDER BY id
+        """,
+        (current,),
+    ).fetchall()
+    for row in rows:
+        con.execute(
+            "UPDATE upstreams SET status = '不可用', last_error = 'SOCKS5: 已到期', updated_at = ? WHERE id = ?",
+            (current, row["id"]),
+        )
+        con.execute(
+            "INSERT INTO events(level, message, created_at) VALUES (?, ?, ?)",
+            ("警告", f"SOCKS5 {row['remark'] or row['host']} 已到期，绑定套餐已阻断", current),
+        )
+        changed += 1
+    return changed
+
+
 def enforce_quotas():
     init_db()
     changed = 0
     traffic = traffic_map()
     with connect_manager_db() as con:
+        changed += disable_expired_upstreams(con)
         packages = con.execute("SELECT * FROM packages ORDER BY id").fetchall()
         changed += disable_expired_packages(con, packages)
         for p in packages:
@@ -1336,6 +1410,7 @@ def enforce_quotas():
                 changed += 1
     if changed:
         generate_subscriptions()
+        refresh_routes_best_effort("巡检后刷新")
     return changed
 
 
@@ -1398,7 +1473,18 @@ def create_package(payload):
     upstream_id = payload.get("upstream_id") or None
     if not upstream_id:
         with connect_manager_db() as con:
-            row = con.execute("SELECT id FROM upstreams WHERE protocol = 'socks' ORDER BY id LIMIT 1").fetchone()
+            row = con.execute(
+                """
+                SELECT id
+                FROM upstreams
+                WHERE protocol = 'socks'
+                  AND (expires_at = 0 OR expires_at > ?)
+                  AND status != '不可用'
+                ORDER BY id
+                LIMIT 1
+                """,
+                (now(),),
+            ).fetchone()
             upstream_id = row["id"] if row else None
     if not upstream_id:
         raise ValueError("请先添加一个 SOCKS5 上游")
@@ -1666,11 +1752,12 @@ class Handler(BaseHTTPRequestHandler):
                     quota_gb = float(payload.get("quota_gb") or 0)
                 except (TypeError, ValueError):
                     quota_gb = 0
+                expires_at = parse_upstream_expires_at(payload.get("expires_at"))
                 with connect_manager_db() as con:
                     con.execute(
                         """
-                        INSERT INTO upstreams(protocol, host, port, username, password, remark, assigned_to, quota_gb, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO upstreams(protocol, host, port, username, password, remark, assigned_to, quota_gb, expires_at, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             item["protocol"],
@@ -1681,6 +1768,7 @@ class Handler(BaseHTTPRequestHandler):
                             remark,
                             assigned_to,
                             quota_gb,
+                            expires_at,
                             now(),
                             now(),
                         ),
@@ -1713,6 +1801,8 @@ class Handler(BaseHTTPRequestHandler):
                 "remark": item.get("remark") or "",
                 "assigned_to": item.get("assigned_to") or "",
                 "status": item.get("status") or "",
+                "expires_at": int(item.get("expires_at") or 0),
+                "expires_at_text": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(item.get("expires_at") or 0))) if item.get("expires_at") else "",
                 "uri": uri,
                 "line": f"{host}:{port}:{item.get('username') or ''}:{item.get('password') or ''}",
             }
@@ -1726,33 +1816,62 @@ class Handler(BaseHTTPRequestHandler):
                 quota_gb = float(payload.get("quota_gb") or 0)
             except (TypeError, ValueError):
                 quota_gb = 0
+            expires_at = parse_upstream_expires_at(payload.get("expires_at"))
             with connect_manager_db() as con:
-                row = con.execute("SELECT id FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
+                row = con.execute("SELECT id, status, last_error FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
                 if not row:
                     self.send_json({"ok": False, "message": "SOCKS5 不存在"}, 404)
                     return
+                status = row["status"]
+                last_error = row["last_error"]
+                if expires_at and expires_at <= now():
+                    status = "不可用"
+                    last_error = "SOCKS5: 已到期"
+                elif row["last_error"] == "SOCKS5: 已到期":
+                    status = "未检测"
+                    last_error = ""
                 con.execute(
-                    "UPDATE upstreams SET remark = ?, assigned_to = ?, quota_gb = ?, updated_at = ? WHERE id = ?",
+                    """
+                    UPDATE upstreams
+                    SET remark = ?, assigned_to = ?, quota_gb = ?, expires_at = ?,
+                        status = ?, last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
                     (
                         payload.get("remark") or "",
                         payload.get("assigned_to") or "",
                         quota_gb,
+                        expires_at,
+                        status,
+                        last_error,
                         now(),
                         upstream_id,
                     ),
                 )
+                bound = con.execute("SELECT id FROM packages WHERE upstream_id = ? LIMIT 1", (upstream_id,)).fetchone()
+            if bound:
+                refresh_routes_best_effort("保存 SOCKS5 后刷新")
             self.send_json({"ok": True, "message": "已保存 SOCKS5"})
             return
         match = re.match(r"^/api/upstreams/(\d+)/check$", path)
         if match and self.command == "POST":
             upstream_id = int(match.group(1))
+            expired = False
             with connect_manager_db() as con:
                 row = con.execute("SELECT * FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
                 if not row:
                     self.send_json({"ok": False, "message": "SOCKS5 不存在"}, 404)
                     return
                 item = dict(row)
+                if upstream_is_expired(item):
+                    con.execute(
+                        "UPDATE upstreams SET status = '不可用', last_error = 'SOCKS5: 已到期', last_check_at = ?, updated_at = ? WHERE id = ?",
+                        (now(), now(), upstream_id),
+                    )
+                    expired = True
                 try:
+                    if expired:
+                        raise RuntimeError("SOCKS5: 已到期")
                     protocol, error = check_upstream(item)
                     con.execute(
                         "UPDATE upstreams SET protocol = ?, status = '可用', last_error = '', last_check_at = ?, updated_at = ? WHERE id = ?",
@@ -1760,11 +1879,15 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     self.send_json({"ok": True, "message": f"检测可用，协议：{protocol}"})
                 except Exception as exc:
-                    con.execute(
-                        "UPDATE upstreams SET status = '不可用', last_error = ?, last_check_at = ?, updated_at = ? WHERE id = ?",
-                        (str(exc), now(), now(), upstream_id),
-                    )
-                    self.send_json({"ok": False, "message": f"检测失败：{type(exc).__name__}"}, 200)
+                    if not expired:
+                        con.execute(
+                            "UPDATE upstreams SET status = '不可用', last_error = ?, last_check_at = ?, updated_at = ? WHERE id = ?",
+                            (str(exc), now(), now(), upstream_id),
+                        )
+                    msg = "SOCKS5 已到期" if expired else (str(exc) or type(exc).__name__)
+                    self.send_json({"ok": False, "message": f"检测失败：{msg}"}, 200)
+            if expired:
+                refresh_routes_best_effort("SOCKS5 到期检测")
             return
         match = re.match(r"^/api/upstreams/(\d+)$", path)
         if match and self.command == "DELETE":
