@@ -15,7 +15,7 @@ import ConfirmDialog from '@/components/domain/dialogs/ConfirmDialog.vue'
 
 /**
  * 用户套餐页（对应 stitch proxy3x_2）。表格 + 顶部 新增用户/额度巡检/刷新订阅。
- * 绑定家宽下拉直接保存；编辑/删除走弹框。
+ * 绑定 SOCKS5 下拉直接保存；编辑/删除走弹框。
  */
 const store = useDashboardStore()
 usePolling(() => store.refresh(), 15000)
@@ -130,7 +130,7 @@ async function onBind(p: Package, upstreamId: number | null) {
       upstream_id: upstreamId,
       expires_at: p.expires_at || null,
     })
-    toast.success('已更新绑定家宽')
+    toast.success('已更新绑定 SOCKS5')
   } catch (e) {
     toast.error(e instanceof ApiError ? e.message : '更新失败')
     await store.refresh()

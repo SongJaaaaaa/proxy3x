@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useTheme } from '@/composables/useTheme'
 import Icon from '@/components/ui/Icon.vue'
 
 /**
- * NavSidebar —— 固定左侧导航（240px）。品牌区 + 总览/用户套餐/家宽池 + 底部退出。
+ * NavSidebar —— 固定左侧导航（240px）。品牌区 + 总览/用户套餐/SOCKS5 + 底部主题切换/退出。
  * 与 stitch 参考 UI 一致：玻璃背景、激活项左侧绿色描边。
  */
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const { isDark, toggle: toggleTheme } = useTheme()
 
 const items = [
   { to: '/dashboard', label: '总览', icon: 'dashboard' },
   { to: '/packages', label: '用户套餐', icon: 'inventory_2' },
-  { to: '/upstreams', label: '家宽池', icon: 'lan' },
+  { to: '/upstreams', label: 'SOCKS5', icon: 'lan' },
 ]
 
 async function logout() {
@@ -25,7 +27,7 @@ async function logout() {
 
 <template>
   <nav
-    class="w-[240px] h-screen fixed left-0 top-0 z-40 flex flex-col p-gutter bg-background/80 backdrop-blur-xl border-r border-outline-variant/20 shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
+    class="w-[240px] h-screen fixed left-0 top-0 z-40 flex flex-col p-gutter bg-surface-container-lowest/95 backdrop-blur-xl border-r border-outline-variant/60 shadow-[0_8px_32px_rgba(15,23,42,0.08)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
   >
     <!-- 品牌 -->
     <div class="mb-8 px-2 flex items-center gap-3">
@@ -63,6 +65,15 @@ async function logout() {
     <!-- 底部 -->
     <div class="mt-auto flex flex-col gap-2">
       <div class="h-px w-full bg-outline-variant/20 my-2"></div>
+      <!-- 主题切换：暗夜 ⇄ 白天 -->
+      <button
+        class="flex items-center gap-3 px-4 py-2 rounded-lg text-on-surface-variant hover:text-primary hover:bg-surface-variant/30 transition-colors"
+        :title="isDark ? '切换到白天模式' : '切换到暗夜模式'"
+        @click="toggleTheme"
+      >
+        <Icon :name="isDark ? 'light_mode' : 'dark_mode'" :size="20" />
+        <span class="font-body-md text-sm">{{ isDark ? '白天模式' : '暗夜模式' }}</span>
+      </button>
       <div class="px-2 flex items-center gap-2 text-on-surface-variant">
         <Icon name="account_circle" :size="20" />
         <span class="font-body-md text-sm truncate">{{ auth.username || 'admin' }}</span>

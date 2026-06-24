@@ -1,43 +1,45 @@
 import type { Config } from 'tailwindcss'
 import animate from 'tailwindcss-animate'
 
-// proxy3x 暗色科技主题 —— 与 stitch 生成 UI（Cyber-Proxy Management）同款 token。
-// 颜色直接采用 stitch DESIGN.md 的 Material 命名，方便 1:1 还原参考图的 class。
+// 颜色统一走 CSS 变量。使用 Tailwind 官方的 <alpha-value> 写法，
+// 避免 dev server / build 把主题色提前编译成某一套固定 RGB。
+const v = (name: string) => `rgb(var(${name}) / <alpha-value>)`
+
 export default {
   darkMode: 'class',
   content: ['./index.html', './src/**/*.{vue,ts}'],
   theme: {
     extend: {
       colors: {
-        'on-primary': '#002b75',
-        background: '#0f141b',
-        'secondary-fixed': '#24ffcd',
-        'secondary-fixed-dim': '#00e0b3',
-        outline: '#8c90a1',
-        'outline-variant': '#424656',
-        'tertiary-container': '#a32bff',
-        'on-tertiary-container': '#fff5ff',
-        primary: '#b3c5ff',
-        'primary-container': '#0066ff',
-        'on-primary-container': '#f8f7ff',
-        'surface-dim': '#0f141b',
-        'surface': '#0f141b',
-        'surface-bright': '#353941',
-        'surface-variant': '#31353d',
-        'surface-container-lowest': '#0a0e15',
-        'surface-container-low': '#181c23',
-        'surface-container': '#1c2027',
-        'surface-container-high': '#262a32',
-        'surface-container-highest': '#31353d',
-        'on-surface': '#dfe2ed',
-        'on-surface-variant': '#c2c6d8',
-        'on-background': '#dfe2ed',
-        error: '#ffb4ab',
-        'error-container': '#93000a',
-        'on-error': '#690005',
-        'on-error-container': '#ffdad6',
-        tertiary: '#dfb7ff',
-        secondary: '#ffffff',
+        'on-primary': v('--c-on-primary'),
+        background: v('--c-background'),
+        'secondary-fixed': v('--c-secondary-fixed'),
+        'secondary-fixed-dim': v('--c-secondary-fixed-dim'),
+        outline: v('--c-outline'),
+        'outline-variant': v('--c-outline-variant'),
+        'tertiary-container': v('--c-tertiary-container'),
+        'on-tertiary-container': v('--c-on-tertiary-container'),
+        primary: v('--c-primary'),
+        'primary-container': v('--c-primary-container'),
+        'on-primary-container': v('--c-on-primary-container'),
+        'surface-dim': v('--c-surface-dim'),
+        'surface': v('--c-surface'),
+        'surface-bright': v('--c-surface-bright'),
+        'surface-variant': v('--c-surface-variant'),
+        'surface-container-lowest': v('--c-surface-container-lowest'),
+        'surface-container-low': v('--c-surface-container-low'),
+        'surface-container': v('--c-surface-container'),
+        'surface-container-high': v('--c-surface-container-high'),
+        'surface-container-highest': v('--c-surface-container-highest'),
+        'on-surface': v('--c-on-surface'),
+        'on-surface-variant': v('--c-on-surface-variant'),
+        'on-background': v('--c-on-background'),
+        error: v('--c-error'),
+        'error-container': v('--c-error-container'),
+        'on-error': v('--c-on-error'),
+        'on-error-container': v('--c-on-error-container'),
+        tertiary: v('--c-tertiary'),
+        secondary: v('--c-secondary'),
       },
       borderRadius: {
         DEFAULT: '0.25rem',

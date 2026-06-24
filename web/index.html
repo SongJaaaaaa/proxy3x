@@ -1,9 +1,23 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>proxy3x 管理面板</title>
+    <!-- 首屏防闪烁：在渲染前根据已保存的主题决定是否加 .dark（默认暗夜） -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('proxy3x-theme')
+          if (t !== 'light' && t !== 'dark') t = 'dark'
+          document.documentElement.dataset.theme = t
+          if (t === 'dark') document.documentElement.classList.add('dark')
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark'
+          document.documentElement.classList.add('dark')
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

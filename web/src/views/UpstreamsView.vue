@@ -15,7 +15,7 @@ import UpstreamDetailDialog from '@/components/domain/dialogs/UpstreamDetailDial
 import ConfirmDialog from '@/components/domain/dialogs/ConfirmDialog.vue'
 
 /**
- * 家宽池页（对应 stitch proxy3x_4）。卡片网格 + 顶部在线/异常统计 + 新增家宽。
+ * SOCKS5 上游页（对应 stitch proxy3x_4）。卡片网格 + 顶部在线/异常统计 + 新增 SOCKS5。
  * 检测/编辑/删除走 store（调接口后 refresh）。
  */
 const store = useDashboardStore()
@@ -114,10 +114,10 @@ async function onSubmit(payload: { line: string; remark: string; quota_gb: numbe
   try {
     if (editing.value) {
       await store.updateUpstream(editing.value.id, { remark: payload.remark, quota_gb: payload.quota_gb })
-      toast.success('已保存家宽')
+      toast.success('已保存 SOCKS5')
     } else {
       await store.createUpstream({ line: payload.line, remark: payload.remark, quota_gb: payload.quota_gb })
-      toast.success('家宽已加入池子')
+      toast.success('SOCKS5 已保存')
     }
     formOpen.value = false
   } catch (e) {
@@ -148,7 +148,7 @@ async function onRemove() {
   removingBusy.value = true
   try {
     await store.deleteUpstream(removing.value.id)
-    toast.success('已删除家宽')
+    toast.success('已删除 SOCKS5')
     confirmOpen.value = false
   } catch (e) {
     toast.error(e instanceof ApiError ? e.message : '删除失败')
@@ -159,7 +159,7 @@ async function onRemove() {
 </script>
 
 <template>
-  <AppShell title="家宽池配置" subtitle="管理和监控您的家庭宽带代理节点。">
+  <AppShell title="SOCKS5 链式" subtitle="管理唯一出口上游，用户套餐入口会固定转发到这里。">
     <template #actions>
       <Button
         variant="ghost"
@@ -171,7 +171,7 @@ async function onRemove() {
         {{ checkingAll ? `检测中 ${checkProgress.done}/${checkProgress.total}` : '一键检测' }}
       </Button>
       <Button variant="primary" @click="openCreate">
-        <Icon name="add" :size="18" />新增家宽
+        <Icon name="add" :size="18" />新增 SOCKS5
       </Button>
     </template>
 
@@ -195,7 +195,7 @@ async function onRemove() {
     <div v-if="store.upstreams.length" class="flex items-center gap-3 flex-wrap shrink-0">
       <div class="relative w-72 max-w-full">
         <Icon name="search" :size="18" class="absolute left-3 top-1/2 -translate-y-1/2 text-outline" />
-        <input v-model="keyword" class="control pl-9" placeholder="搜索备注 / 名称(IP) / 分配对象…" />
+        <input v-model="keyword" class="control pl-9" placeholder="搜索备注 / IP / 分配对象…" />
       </div>
       <span class="ml-auto font-label-sm text-label-sm text-outline">
         共 {{ filteredUpstreams.length }} / {{ store.upstreams.length }} 个
@@ -231,12 +231,12 @@ async function onRemove() {
       class="glass-panel rounded-xl py-16 flex flex-col items-center gap-3 text-outline"
     >
       <Icon name="search_off" :size="40" />
-      <p class="font-body-md text-sm">没有匹配「{{ keyword }}」的家宽。</p>
+      <p class="font-body-md text-sm">没有匹配「{{ keyword }}」的 SOCKS5。</p>
     </div>
     <!-- 空池 -->
     <div v-else class="glass-panel rounded-xl py-16 flex flex-col items-center gap-3 text-outline">
       <Icon name="lan" :size="40" />
-      <p class="font-body-md text-sm">家宽池还是空的，点击右上角「新增家宽」添加节点。</p>
+      <p class="font-body-md text-sm">还没有 SOCKS5 上游，点击右上角「新增 SOCKS5」添加节点。</p>
     </div>
 
     <UpstreamFormDialog
@@ -250,8 +250,8 @@ async function onRemove() {
     <UpstreamDetailDialog :open="detailOpen" :item="viewing" @close="detailOpen = false" />
     <ConfirmDialog
       :open="confirmOpen"
-      title="删除家宽"
-      :message="`确定删除家宽「${removing?.remark || removing?.host}」？绑定它的套餐将解绑并刷新路由。`"
+      title="删除 SOCKS5"
+      :message="`确定删除 SOCKS5「${removing?.remark || removing?.host}」？绑定它的套餐将解绑并刷新路由。`"
       :busy="removingBusy"
       @close="confirmOpen = false"
       @confirm="onRemove"

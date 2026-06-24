@@ -40,7 +40,7 @@ export interface Package {
   shadowrocket_alt_url: string
 }
 
-/** 家宽出口（upstreams 表 + 用量 + 额度，账号/密码已遮罩） */
+/** SOCKS5 上游（upstreams 表 + 用量 + 额度，账号/密码已遮罩） */
 export interface Upstream {
   id: number
   protocol: string
@@ -60,7 +60,7 @@ export interface Upstream {
   usage_percent: number | null // null = 未设额度，前端不画进度
 }
 
-/** 家宽完整明文信息（/api/upstreams/{id}/reveal，账号密码未遮罩） */
+/** SOCKS5 完整明文信息（/api/upstreams/{id}/reveal，账号密码未遮罩） */
 export interface UpstreamReveal {
   id: number
   protocol: string
@@ -112,7 +112,7 @@ export interface UpdatePackageBody {
   expires_at?: string | number | null
 }
 
-/** 新增家宽入参 */
+/** 新增 SOCKS5 入参 */
 export interface CreateUpstreamBody {
   line: string
   remark?: string
@@ -120,7 +120,7 @@ export interface CreateUpstreamBody {
   quota_gb?: number
 }
 
-/** 编辑家宽入参 */
+/** 编辑 SOCKS5 入参 */
 export interface UpdateUpstreamBody {
   remark?: string
   assigned_to?: string

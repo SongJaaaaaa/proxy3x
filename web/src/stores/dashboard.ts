@@ -26,7 +26,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
-  /** 在线/异常家宽计数（用于家宽页顶部统计） */
+  /** 在线/异常 SOCKS5 计数（用于上游页顶部统计） */
   const upstreamOnline = computed(() => upstreams.value.filter((u) => u.status === '可用').length)
   const upstreamError = computed(() => upstreams.value.filter((u) => u.status === '不可用').length)
 
@@ -77,12 +77,12 @@ export const useDashboardStore = defineStore('dashboard', () => {
   async function createUpstream(body: CreateUpstreamBody) {
     const r = await api.createUpstream(body)
     await refresh()
-    return r.message ?? '家宽已加入池子'
+    return r.message ?? 'SOCKS5 已保存'
   }
   async function updateUpstream(id: number, body: UpdateUpstreamBody) {
     const r = await api.updateUpstream(id, body)
     await refresh()
-    return r.message ?? '已保存家宽'
+    return r.message ?? '已保存 SOCKS5'
   }
   async function checkUpstream(id: number) {
     const r = await api.checkUpstream(id)
@@ -92,9 +92,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
   async function deleteUpstream(id: number) {
     const r = await api.deleteUpstream(id)
     await refresh()
-    return r.message ?? '已删除家宽'
+    return r.message ?? '已删除 SOCKS5'
   }
-  // 只读：拉取家宽明文信息（不改单一数据源，无需 refresh）
+  // 只读：拉取 SOCKS5 明文信息（不改单一数据源，无需 refresh）
   async function revealUpstream(id: number) {
     const r = await api.revealUpstream(id)
     return r.data

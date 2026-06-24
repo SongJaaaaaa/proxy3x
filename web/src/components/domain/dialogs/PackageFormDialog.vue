@@ -10,7 +10,7 @@ import DatePicker from '@/components/ui/DatePicker.vue'
 
 /**
  * 新增/编辑用户套餐弹框（对应 stitch proxy3x_5）。
- * 字段：用户名、订阅名(仅新增)、总额度、住宅额度、绑定家宽、到期时间、备注。
+ * 字段：用户名、订阅名(仅新增)、总额度、绑定 SOCKS5、到期时间、备注。
  * 失败原因内联显示。提交由父组件处理。
  */
 const props = defineProps<{ open: boolean; editing?: Package | null; upstreams: Upstream[]; busy?: boolean }>()
@@ -32,8 +32,8 @@ const emit = defineEmits<{
 const form = reactive({
   name: '',
   sub_id: '',
-  total_gb: 100,
-  residential_gb: 50,
+  total_gb: 500,
+  residential_gb: 0,
   upstream_id: null as number | null,
   expires_at: '',
   notes: '',
@@ -48,8 +48,8 @@ watch(
     const e = props.editing
     form.name = e?.name ?? ''
     form.sub_id = e?.sub_id ?? ''
-    form.total_gb = e?.total_gb ?? 100
-    form.residential_gb = e?.residential_gb ?? 50
+    form.total_gb = e?.total_gb ?? 500
+    form.residential_gb = e?.residential_gb ?? 0
     form.upstream_id = e?.upstream_id ?? null
     form.notes = e?.notes ?? ''
     // 新增时默认一个月后；编辑时回填已有到期时间（留空 = 永久有效）。
@@ -91,7 +91,7 @@ function submit() {
       <Icon name="info" :size="20" class="text-secondary-fixed shrink-0 mt-0.5" />
       <div class="font-body-md text-sm text-on-surface-variant leading-relaxed">
         <p class="font-semibold text-on-surface mb-0.5">系统提示</p>
-        请为新用户分配独立的订阅名（英文、数字、- 、_）。额度将在下个结算周期自动重置。
+        创建后会生成一个 VLESS/REALITY 入口，默认 500GB、一个月有效，出口固定走绑定的 SOCKS5 上游。
       </div>
     </div>
 
@@ -110,12 +110,9 @@ function submit() {
       <Field label="总额度 (GB)" required>
         <input v-model.number="form.total_gb" type="number" min="1" class="control" />
       </Field>
-      <Field label="住宅额度 (GB)" required>
-        <input v-model.number="form.residential_gb" type="number" min="1" class="control" />
-      </Field>
-      <Field label="绑定家宽">
+      <Field label="绑定 SOCKS5">
         <select v-model="form.upstream_id" class="control">
-          <option :value="null">无绑定</option>
+          <option :value="null">默认 SOCKS5</option>
           <option v-for="u in upstreams" :key="u.id" :value="u.id">
             {{ u.remark || u.host }} ({{ u.protocol }})
           </option>

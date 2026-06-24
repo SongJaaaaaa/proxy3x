@@ -31,7 +31,7 @@ export const api = {
   ensureResidential: (id: number) => http.post(`/packages/${id}/residential`),
   syncPackage: (id: number) => http.post(`/packages/${id}/sync`),
 
-  // —— 家宽池 ——
+  // —— SOCKS5 上游 ——
   createUpstream: (body: CreateUpstreamBody) => http.post('/upstreams', body),
   revealUpstream: (id: number) => http.get<UpstreamReveal>(`/upstreams/${id}/reveal`),
   updateUpstream: (id: number, body: UpdateUpstreamBody) => http.put(`/upstreams/${id}`, body),

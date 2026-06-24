@@ -19,11 +19,11 @@ from http import cookies
 from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
-APP_DIR = Path(os.environ.get("PROXY3X_APP_DIR", "/opt/3x-ui-manager"))
+APP_DIR = Path(os.environ.get("PROXY3X_APP_DIR", Path(__file__).resolve().parent))
 CHAIN_DIR = Path(os.environ.get("PROXY3X_CHAIN_DIR", "/opt/3x-ui-chain"))
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "manager.db"
@@ -43,6 +43,9 @@ OUTBOUND_TEST_URL = "https://www.google.com/generate_204"
 GB = 1024 * 1024 * 1024
 SESSION_MAX_AGE = 86400
 DEFAULT_PACKAGE_EXPIRE_SECONDS = 30 * 86400
+DEFAULT_PACKAGE_TOTAL_GB = 500
+DEFAULT_NODE_NAME = "高速节点"
+BLOCK_OUTBOUND_TAG = "proxy3x-block"
 
 
 def now():
@@ -193,7 +196,7 @@ def init_db():
             """,
             (DEFAULT_PACKAGE_EXPIRE_SECONDS,),
         )
-        # 家宽额度字段：用于家宽池用量进度条的分母（GB）。0 = 未设额度，前端不画进度条。
+        # SOCKS5 额度字段：用于上游用量进度条的分母（GB）。0 = 未设额度，前端不画进度条。
         upstream_columns = {row["name"] for row in con.execute("PRAGMA table_info(upstreams)").fetchall()}
         if "quota_gb" not in upstream_columns:
             con.execute("ALTER TABLE upstreams ADD COLUMN quota_gb REAL NOT NULL DEFAULT 0")
@@ -552,11 +555,8 @@ def build_clash_yaml(package):
         return ""
     nodes = []
     direct = json.loads(package["direct_entry_json"] or "{}")
-    residential = json.loads(package["residential_entry_json"] or "{}")
     if direct:
-        nodes.append(("🇺🇸 娱乐流量", direct))
-    if residential:
-        nodes.append(("🇺🇸 住宅流量", residential))
+        nodes.append((direct.get("node_name") or DEFAULT_NODE_NAME, direct))
     if not nodes:
         return ""
 
@@ -601,11 +601,8 @@ def build_shadowrocket_list(package):
         return ""
     lines = []
     direct = json.loads(package["direct_entry_json"] or "{}")
-    residential = json.loads(package["residential_entry_json"] or "{}")
     if direct:
-        lines.append(vless_uri(direct, "🇺🇸 娱乐流量"))
-    if residential:
-        lines.append(vless_uri(residential, "🇺🇸 住宅流量"))
+        lines.append(vless_uri(direct, direct.get("node_name") or DEFAULT_NODE_NAME))
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -625,6 +622,36 @@ def generate_subscriptions():
         elif not yaml_text:
             delete_subscription_files(package["sub_id"])
     update_deployment_manager_metadata()
+
+
+def package_userinfo(package):
+    usage = package_usage(package)
+    return "; ".join(
+        [
+            f"upload={usage['upload']}",
+            f"download={usage['download']}",
+            f"total={bytes_from_gb(package['total_gb'])}",
+            f"expire={int(package['expires_at'] or 0)}",
+        ]
+    )
+
+
+def subscription_kind(headers, params):
+    kind = (params.get("type") or params.get("target") or [""])[0].lower()
+    if kind in ("shadowrocket", "list", "sr"):
+        return "shadowrocket"
+    if kind in ("clash", "yaml", "meta"):
+        return "clash"
+    ua = (headers.get("User-Agent") or "").lower()
+    if "shadowrocket" in ua:
+        return "shadowrocket"
+    return "clash"
+
+
+def package_subscription_response(package, kind):
+    if kind == "shadowrocket":
+        return build_shadowrocket_list(package), "text/plain; charset=utf-8"
+    return build_clash_yaml(package), "text/yaml; charset=utf-8"
 
 
 def delete_subscription_files(sub_id):
@@ -655,6 +682,7 @@ def update_deployment_manager_metadata():
                 "name": p["name"],
                 "total_gb": p["total_gb"],
                 "residential_gb": p["residential_gb"],
+                "expire": int(p["expires_at"] or 0),
                 "usage_sources": sources,
             }
         )
@@ -734,10 +762,10 @@ def import_existing_packages():
 
 def parse_upstream_line(text):
     text = (text or "").strip()
-    protocol = "auto"
+    protocol = "socks"
     if "://" in text:
         parsed = urlparse(text)
-        protocol = (parsed.scheme or "auto").lower()
+        protocol = (parsed.scheme or "socks").lower()
         host = parsed.hostname or ""
         try:
             port = int(parsed.port or 0)
@@ -765,11 +793,11 @@ def parse_upstream_line(text):
     username = (username or "").strip()
     password = (password or "").strip()
     if not host or not port or not username or not password:
-        raise ValueError("家宽地址、端口、账号、密码不能为空")
-    if protocol not in ("auto", "http", "socks", "socks5"):
-        protocol = "auto"
+        raise ValueError("SOCKS5 地址、端口、账号、密码不能为空")
     if protocol == "socks5":
         protocol = "socks"
+    if protocol != "socks":
+        raise ValueError("当前版本只支持 SOCKS5")
     return {"protocol": protocol, "host": host, "port": port, "username": username, "password": password}
 
 
@@ -837,31 +865,20 @@ def test_socks_proxy(upstream):
 
 
 def check_upstream(upstream):
-    protocol = upstream["protocol"]
-    errors = []
-    if protocol in ("auto", "http"):
-        try:
-            test_http_proxy(upstream)
-            return "http", ""
-        except Exception as exc:
-            errors.append(f"HTTP: {type(exc).__name__}")
-    if protocol in ("auto", "socks"):
-        try:
-            test_socks_proxy(upstream)
-            return "socks", ""
-        except Exception as exc:
-            errors.append(f"SOCKS5: {type(exc).__name__}")
-    raise RuntimeError("；".join(errors) or "检测失败")
+    try:
+        test_socks_proxy(upstream)
+        return "socks", ""
+    except Exception as exc:
+        raise RuntimeError(f"SOCKS5: {type(exc).__name__}") from exc
 
 
 def xray_outbound_for_upstream(row):
     users = []
     if row["username"] or row["password"]:
         users = [{"user": row["username"], "pass": row["password"]}]
-    protocol = row["protocol"] if row["protocol"] in ("http", "socks") else "http"
     return {
         "tag": f"proxy3x-upstream-{row['id']}",
-        "protocol": protocol,
+        "protocol": "socks",
         "settings": {
             "servers": [
                 {
@@ -872,6 +889,26 @@ def xray_outbound_for_upstream(row):
             ]
         },
     }
+
+
+def block_outbound():
+    return {"tag": BLOCK_OUTBOUND_TAG, "protocol": "blackhole", "settings": {}}
+
+
+def inbound_tag_map():
+    result = {}
+    if not CHAIN_DB.exists():
+        return result
+    con = sqlite3.connect(f"file:{CHAIN_DB}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        for row in con.execute("SELECT port, tag FROM inbounds WHERE port IS NOT NULL"):
+            port = int(row["port"] or 0)
+            if port:
+                result[port] = row["tag"] or f"inbound-{port}"
+    finally:
+        con.close()
+    return result
 
 
 def fetch_xray_template(client):
@@ -894,12 +931,25 @@ def apply_xray_routes():
         ).fetchall()
         upstreams = con.execute("SELECT * FROM upstreams ORDER BY id").fetchall()
 
-    managed_ports = {
-        int(p["residential_port"])
+    package_ports = set()
+    managed_ports = set()
+    for p in packages:
+        for port in (p["direct_port"], p["residential_port"]):
+            if port:
+                package_ports.add(int(port))
+        if not p["upstream_id"]:
+            continue
+        if p["direct_port"]:
+            managed_ports.add(int(p["direct_port"]))
+        if p["residential_port"]:
+            managed_ports.add(int(p["residential_port"]))
+    tag_by_port = inbound_tag_map()
+    package_tags = {tag_by_port.get(port, f"inbound-{port}") for port in package_ports}
+    used_upstream_ids = {
+        int(p["upstream_id"])
         for p in packages
-        if p["residential_port"] and p["upstream_id"]
+        if p["upstream_id"] and (p["direct_port"] or p["residential_port"])
     }
-    used_upstream_ids = {int(p["upstream_id"]) for p in packages if p["residential_port"] and p["upstream_id"]}
     client = get_panel_client()
     xray, test_url = fetch_xray_template(client)
     xray.setdefault("outbounds", [])
@@ -910,7 +960,10 @@ def apply_xray_routes():
         outbound
         for outbound in xray["outbounds"]
         if not str(outbound.get("tag", "")).startswith("proxy3x-upstream-")
+        and str(outbound.get("tag", "")) != BLOCK_OUTBOUND_TAG
     ]
+    if package_ports:
+        xray["outbounds"].append(block_outbound())
     for row in upstreams:
         if int(row["id"]) in used_upstream_ids:
             xray["outbounds"].append(xray_outbound_for_upstream(row))
@@ -920,29 +973,30 @@ def apply_xray_routes():
     for rule in old_rules:
         inbound_tags = rule.get("inboundTag") or []
         outbound_tag = str(rule.get("outboundTag") or "")
-        if outbound_tag.startswith("proxy3x-upstream-"):
+        if outbound_tag.startswith("proxy3x-upstream-") or outbound_tag == BLOCK_OUTBOUND_TAG:
             continue
-        if any(str(tag).startswith("inbound-") for tag in inbound_tags) and str(rule.get("outboundTag") or "").startswith("proxy3x-upstream-"):
-            continue
-        tag_ports = []
-        for tag in inbound_tags:
-            try:
-                if str(tag).startswith("inbound-"):
-                    tag_ports.append(int(str(tag).split("-", 1)[1]))
-            except ValueError:
-                pass
-        if any(port in managed_ports for port in tag_ports):
+        if any(str(tag) in package_tags for tag in inbound_tags):
             continue
         kept_rules.append(rule)
 
     new_rules = []
     for p in packages:
-        if not p["residential_port"] or not p["upstream_id"]:
+        ports = [port for port in (p["direct_port"], p["residential_port"]) if port]
+        if not ports:
+            continue
+        if not p["upstream_id"]:
+            new_rules.append(
+                {
+                    "type": "field",
+                    "inboundTag": [tag_by_port.get(int(port), f"inbound-{int(port)}") for port in ports],
+                    "outboundTag": BLOCK_OUTBOUND_TAG,
+                }
+            )
             continue
         new_rules.append(
             {
                 "type": "field",
-                "inboundTag": [f"inbound-{int(p['residential_port'])}"],
+                "inboundTag": [tag_by_port.get(int(port), f"inbound-{int(port)}") for port in ports],
                 "outboundTag": f"proxy3x-upstream-{int(p['upstream_id'])}",
             }
         )
@@ -954,7 +1008,7 @@ def apply_xray_routes():
         {"xraySetting": pretty_json(xray), "outboundTestUrl": test_url},
     )
     client.post_json("/panel/api/server/restartXrayService")
-    log_event("信息", f"已更新住宅路由 {len(new_rules)} 条")
+    log_event("信息", f"已更新链式路由 {len(new_rules)} 条")
 
 
 def traffic_map():
@@ -1009,6 +1063,32 @@ def delete_xui_inbounds(ports, emails):
         con.close()
 
 
+def disable_xui_inbounds(ports, emails):
+    ports = [int(port) for port in ports if port]
+    emails = [email for email in emails if email]
+    if not ports or not CHAIN_DB.exists():
+        return 0
+    backup_file(CHAIN_DB, "before-proxy3x-disable-package")
+    con = sqlite3.connect(CHAIN_DB)
+    con.row_factory = sqlite3.Row
+    changed = 0
+    try:
+        placeholders = ",".join("?" for _ in ports)
+        rows = con.execute(f"SELECT id, settings FROM inbounds WHERE port IN ({placeholders})", ports).fetchall()
+        for row in rows:
+            settings = json.loads(row["settings"] or "{}")
+            for client in settings.get("clients") or []:
+                if not emails or client.get("email") in emails:
+                    client["enable"] = False
+            con.execute("UPDATE inbounds SET enable = 0, settings = ? WHERE id = ?", (json_dumps(settings), row["id"]))
+            con.execute("UPDATE client_traffics SET enable = 0 WHERE inbound_id = ?", (row["id"],))
+            changed += 1
+        con.commit()
+        return changed
+    finally:
+        con.close()
+
+
 def delete_package(package_id):
     init_db()
     with connect_manager_db() as con:
@@ -1017,11 +1097,16 @@ def delete_package(package_id):
             raise ValueError("套餐不存在")
         package = dict(row)
         con.execute("DELETE FROM packages WHERE id = ?", (package_id,))
+    ports = [package.get("direct_port"), package.get("residential_port")]
+    emails = [package.get("direct_email"), package.get("residential_email")]
+    disabled = disable_xui_inbounds(ports, emails)
+    removed = delete_xui_inbounds(ports, emails)
     delete_subscription_files(package["sub_id"])
     generate_subscriptions()
-    log_event("信息", f"已从面板删除用户套餐 {package['name']}")
-    run_background("删除套餐后台清理", finish_package_delete, package)
-    return "已删除套餐，节点和路由正在后台清理"
+    apply_xray_routes()
+    restart_xray()
+    log_event("信息", f"已删除用户套餐 {package['name']}，禁用入站 {disabled} 个，清理入站 {removed} 个")
+    return "已删除套餐，旧订阅节点已失效"
 
 
 def finish_package_delete(package):
@@ -1080,10 +1165,14 @@ def package_usage(package, traffic=None):
     traffic = traffic or traffic_map()
     direct = traffic.get((package["direct_email"], int(package["direct_port"] or 0)), {})
     residential = traffic.get((package["residential_email"], int(package["residential_port"] or 0)), {})
+    upload = int(direct.get("up") or 0) + int(residential.get("up") or 0)
+    download = int(direct.get("down") or 0) + int(residential.get("down") or 0)
     direct_used = int(direct.get("up") or 0) + int(direct.get("down") or 0)
     residential_used = int(residential.get("up") or 0) + int(residential.get("down") or 0)
     total_used = direct_used + residential_used
     return {
+        "upload": upload,
+        "download": download,
         "direct_used": direct_used,
         "residential_used": residential_used,
         "total_used": total_used,
@@ -1232,15 +1321,19 @@ def create_package(payload):
     if sub_id != raw_sub_id:
         raise ValueError("订阅名只能使用英文、数字、-、_")
     try:
-        total_gb = float(payload.get("total_gb") or 100)
-        residential_gb = float(payload.get("residential_gb") or 50)
+        total_gb = float(payload.get("total_gb") or DEFAULT_PACKAGE_TOTAL_GB)
+        residential_gb = float(payload.get("residential_gb") or 0)
     except (TypeError, ValueError):
         raise ValueError("额度需要填写数字")
     if total_gb <= 0:
         raise ValueError("总额度需要大于 0")
-    if residential_gb <= 0:
-        raise ValueError("住宅额度需要大于 0")
     upstream_id = payload.get("upstream_id") or None
+    if not upstream_id:
+        with connect_manager_db() as con:
+            row = con.execute("SELECT id FROM upstreams WHERE protocol = 'socks' ORDER BY id LIMIT 1").fetchone()
+            upstream_id = row["id"] if row else None
+    if not upstream_id:
+        raise ValueError("请先添加一个 SOCKS5 上游")
     notes = payload.get("notes") or ""
     expires_at = parse_expires_at(payload.get("expires_at"))
     with connect_manager_db() as con:
@@ -1250,9 +1343,9 @@ def create_package(payload):
     direct_entry = make_inbound(
         {
             "sub_id": sub_id,
-            "email": f"{sub_id}-entertainment",
-            "remark": f"{sub_id}-entertainment",
-            "node_name": "🇺🇸 娱乐流量",
+            "email": f"{sub_id}-node",
+            "remark": f"{sub_id}-node",
+            "node_name": DEFAULT_NODE_NAME,
             "port": direct_port,
             "total_bytes": bytes_from_gb(total_gb),
         }
@@ -1282,24 +1375,22 @@ def create_package(payload):
         )
         package_id = con.execute("SELECT id FROM packages WHERE sub_id = ?", (sub_id,)).fetchone()["id"]
     log_event("信息", f"已新增用户 {name}")
-    run_background("创建后刷新", finish_package_create, package_id, bool(upstream_id))
-    message = "用户已创建，住宅节点和订阅正在后台刷新"
+    run_background("创建后刷新", finish_package_create, package_id)
+    message = "用户已创建，链式路由和订阅正在后台刷新"
     return package_id, message
 
 
-def finish_package_create(package_id, has_upstream):
-    if has_upstream:
-        msg = ensure_residential_node(package_id)
-    else:
-        generate_subscriptions()
-        msg = "订阅已刷新"
+def finish_package_create(package_id):
+    apply_xray_routes()
+    generate_subscriptions()
+    msg = "链式路由和订阅已刷新"
     with connect_manager_db() as con:
         row = con.execute("SELECT name FROM packages WHERE id = ?", (package_id,)).fetchone()
     if row:
         log_event("信息", f"{row['name']} 创建后刷新完成：{msg}")
 
 
-def dashboard_data():
+def dashboard_data(base_url=None):
     init_db()
     import_existing_packages()
     traffic = traffic_map()
@@ -1308,6 +1399,7 @@ def dashboard_data():
         upstreams = [upstream_public(row) for row in con.execute("SELECT * FROM upstreams ORDER BY id").fetchall()]
         events = [dict(row) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 50").fetchall()]
     package_items = []
+    sub_base = (base_url or "https://vpn.sjiaa.cc.cd").rstrip("/")
     total_used = 0
     total_limit = 0
     residential_used = 0
@@ -1324,8 +1416,8 @@ def dashboard_data():
         p["residential_bytes"] = bytes_from_gb(p["residential_gb"])
         p["expired"] = package_is_expired(p)
         p["expires_at_text"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(p["expires_at"] or 0))) if p.get("expires_at") else ""
-        p["clash_url"] = f"https://vpn.sjiaa.cc.cd/{p['sub_id']}.yaml"
-        p["shadowrocket_url"] = f"https://vpn.sjiaa.cc.cd/{p['sub_id']}.list"
+        p["clash_url"] = f"{sub_base}/api/v1/client/subscribe?token={quote(p['sub_id'])}&type=clash"
+        p["shadowrocket_url"] = f"{sub_base}/api/v1/client/subscribe?token={quote(p['sub_id'])}&type=shadowrocket"
         p["shadowrocket_alt_url"] = f"https://{ALT_SUBSCRIPTION_DOMAIN}/{p['sub_id']}.list"
         p.pop("direct_entry_json", None)
         p.pop("residential_entry_json", None)
@@ -1334,7 +1426,7 @@ def dashboard_data():
         used = upstream_usage.get(int(u["id"]), 0)
         u["used_bytes"] = used
         u["used_gb"] = gb_from_bytes(used)
-        # 进度分母 = 家宽额度（quota_bytes）；未设额度（0）时 usage_percent 为 None，前端不画进度条。
+        # 进度分母 = SOCKS5 额度（quota_bytes）；未设额度（0）时 usage_percent 为 None，前端不画进度条。
         quota_bytes = int(u.get("quota_bytes") or 0)
         u["usage_percent"] = round(used / quota_bytes * 100, 1) if quota_bytes > 0 else None
     return {
@@ -1370,6 +1462,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
+            if path == "/api/v1/client/subscribe":
+                self.serve_client_subscription(parsed)
+                return
             if path.startswith("/api/"):
                 self.handle_api(path)
                 return
@@ -1409,6 +1504,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def public_base_url(self):
+        host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").strip()
+        if not host:
+            return "https://vpn.sjiaa.cc.cd"
+        proto = (self.headers.get("X-Forwarded-Proto") or "https").split(",")[0].strip() or "https"
+        return f"{proto}://{host}"
+
+    def serve_client_subscription(self, parsed):
+        params = parse_qs(parsed.query)
+        token = (params.get("token") or params.get("sub_id") or [""])[0].strip()
+        if not token:
+            self.send_error(404)
+            return
+        with connect_manager_db() as con:
+            package = con.execute("SELECT * FROM packages WHERE sub_id = ?", (token,)).fetchone()
+        if not package or not package["enabled"] or package_is_expired(package):
+            self.send_error(403)
+            return
+        kind = subscription_kind(self.headers, params)
+        text, content_type = package_subscription_response(package, kind)
+        if not text:
+            self.send_error(404)
+            return
+        body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Profile-Update-Interval", "3600")
+        self.send_header("Subscription-Userinfo", package_userinfo(package))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     def handle_api(self, path):
         if path == "/api/login" and self.command == "POST":
             payload = self.read_json()
@@ -1432,7 +1561,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/dashboard":
-            self.send_json({"ok": True, "data": dashboard_data()})
+            self.send_json({"ok": True, "data": dashboard_data(self.public_base_url())})
             return
         if path == "/api/enforce" and self.command == "POST":
             changed = enforce_quotas()
@@ -1440,8 +1569,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/regenerate" and self.command == "POST":
             generate_subscriptions()
-            apply_xray_routes()
-            self.send_json({"ok": True, "message": "订阅和路由已刷新"})
+            self.send_json({"ok": True, "message": "订阅已刷新"})
             return
         if path == "/api/upstreams":
             if self.command == "GET":
@@ -1477,8 +1605,8 @@ class Handler(BaseHTTPRequestHandler):
                             now(),
                         ),
                     )
-                log_event("信息", f"已新增家宽：{remark or item['host']}")
-                self.send_json({"ok": True, "message": "家宽已加入池子"})
+                log_event("信息", f"已新增 SOCKS5：{remark or item['host']}")
+                self.send_json({"ok": True, "message": "SOCKS5 已保存"})
                 return
         match = re.match(r"^/api/upstreams/(\d+)/reveal$", path)
         if match and self.command == "GET":
@@ -1486,7 +1614,7 @@ class Handler(BaseHTTPRequestHandler):
             with connect_manager_db() as con:
                 row = con.execute("SELECT * FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
             if not row:
-                self.send_json({"ok": False, "message": "家宽不存在"}, 404)
+                self.send_json({"ok": False, "message": "SOCKS5 不存在"}, 404)
                 return
             item = dict(row)
             scheme = "socks5" if str(item.get("protocol") or "").startswith("socks") else (item.get("protocol") or "http")
@@ -1521,7 +1649,7 @@ class Handler(BaseHTTPRequestHandler):
             with connect_manager_db() as con:
                 row = con.execute("SELECT id FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
                 if not row:
-                    self.send_json({"ok": False, "message": "家宽不存在"}, 404)
+                    self.send_json({"ok": False, "message": "SOCKS5 不存在"}, 404)
                     return
                 con.execute(
                     "UPDATE upstreams SET remark = ?, assigned_to = ?, quota_gb = ?, updated_at = ? WHERE id = ?",
@@ -1533,7 +1661,7 @@ class Handler(BaseHTTPRequestHandler):
                         upstream_id,
                     ),
                 )
-            self.send_json({"ok": True, "message": "已保存家宽"})
+            self.send_json({"ok": True, "message": "已保存 SOCKS5"})
             return
         match = re.match(r"^/api/upstreams/(\d+)/check$", path)
         if match and self.command == "POST":
@@ -1541,7 +1669,7 @@ class Handler(BaseHTTPRequestHandler):
             with connect_manager_db() as con:
                 row = con.execute("SELECT * FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
                 if not row:
-                    self.send_json({"ok": False, "message": "家宽不存在"}, 404)
+                    self.send_json({"ok": False, "message": "SOCKS5 不存在"}, 404)
                     return
                 item = dict(row)
                 try:
@@ -1566,7 +1694,7 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute("UPDATE packages SET upstream_id = NULL WHERE upstream_id = ?", (upstream_id,))
             generate_subscriptions()
             apply_xray_routes()
-            self.send_json({"ok": True, "message": "已删除家宽"})
+            self.send_json({"ok": True, "message": "已删除 SOCKS5"})
             return
 
         if path == "/api/packages":
@@ -1605,8 +1733,8 @@ class Handler(BaseHTTPRequestHandler):
                     """,
                     (
                         payload.get("name") or "",
-                        float(payload.get("total_gb") or 100),
-                        float(payload.get("residential_gb") or 50),
+                        float(payload.get("total_gb") or DEFAULT_PACKAGE_TOTAL_GB),
+                        float(payload.get("residential_gb") or 0),
                         payload.get("notes") or "",
                         int(payload["upstream_id"]) if payload.get("upstream_id") else None,
                         parse_expires_at(payload.get("expires_at")),
@@ -1622,6 +1750,7 @@ class Handler(BaseHTTPRequestHandler):
             if changed_limit:
                 restart_xray()
             generate_subscriptions()
+            apply_xray_routes()
             self.send_json({"ok": True, "message": "已保存"})
             return
         match = re.match(r"^/api/packages/(\d+)/residential$", path)

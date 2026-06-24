@@ -174,8 +174,9 @@ def manager_subscription_userinfo(sub_id):
             expire_values.append(expire)
     total = bytes_from_gb(package.get("total_gb")) or int(package.get("total") or 0)
     parts = [f"upload={upload}", f"download={download}", f"total={total}"]
-    if expire_values:
-        parts.append(f"expire={min(expire_values)}")
+    expire = parse_expire(package.get("expire")) or (min(expire_values) if expire_values else 0)
+    if expire:
+        parts.append(f"expire={expire}")
     return "; ".join(parts)
 
 

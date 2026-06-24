@@ -6,9 +6,81 @@
 @tailwind utilities;
 
 /*
- * proxy3x 全局样式。主题 token 在 tailwind.config.ts，与 stitch 参考 UI 同款。
- * 这里定义：图标字体、玻璃面板复用类、背景辉光、滚动条。
+ * proxy3x 全局样式。
+ * 主题颜色统一走 CSS 变量（tailwind.config.ts 中以 rgb(var(--c-x)) 引用）。
+ * :root = 白天主题，.dark = 暗夜主题；切换逻辑见 composables/useTheme.ts，默认暗夜。
+ * 变量值为 “R G B” 三元组，配合 Tailwind 的 <alpha-value> 支持透明度修饰符。
+ * 本文件还定义：双主题变量、图标字体、玻璃面板、背景辉光、滚动条。
  */
+
+/* ── 白天主题（默认 :root） ───────────────────────────── */
+:root,
+html[data-theme='light'] {
+  --c-background: 248 250 252;
+  --c-on-background: 25 28 36;
+  --c-surface: 255 255 255;
+  --c-surface-dim: 241 245 249;
+  --c-surface-bright: 255 255 255;
+  --c-surface-variant: 226 232 240;
+  --c-surface-container-lowest: 255 255 255;
+  --c-surface-container-low: 255 255 255;
+  --c-surface-container: 255 255 255;
+  --c-surface-container-high: 248 250 252;
+  --c-surface-container-highest: 241 245 249;
+  --c-on-surface: 25 28 36;
+  --c-on-surface-variant: 67 73 92;
+  --c-outline: 110 116 134;
+  --c-outline-variant: 199 204 216;
+  --c-primary: 37 99 235;
+  --c-on-primary: 255 255 255;
+  --c-primary-container: 0 102 255;
+  --c-on-primary-container: 248 247 255;
+  --c-secondary: 26 29 36;
+  --c-secondary-fixed: 12 155 120;
+  --c-secondary-fixed-dim: 9 138 108;
+  --c-tertiary: 147 38 232;
+  --c-tertiary-container: 147 38 232;
+  --c-on-tertiary-container: 255 245 255;
+  --c-error: 211 47 47;
+  --c-error-container: 255 218 214;
+  --c-on-error: 255 255 255;
+  --c-on-error-container: 65 0 5;
+  color-scheme: light;
+}
+
+/* ── 暗夜主题（.dark） ───────────────────────────────── */
+html[data-theme='dark'] {
+  --c-background: 15 20 27;
+  --c-on-background: 223 226 237;
+  --c-surface: 15 20 27;
+  --c-surface-dim: 15 20 27;
+  --c-surface-bright: 53 57 65;
+  --c-surface-variant: 49 53 61;
+  --c-surface-container-lowest: 10 14 21;
+  --c-surface-container-low: 24 28 35;
+  --c-surface-container: 28 32 39;
+  --c-surface-container-high: 38 42 50;
+  --c-surface-container-highest: 49 53 61;
+  --c-on-surface: 223 226 237;
+  --c-on-surface-variant: 194 198 216;
+  --c-outline: 140 144 161;
+  --c-outline-variant: 66 70 86;
+  --c-primary: 179 197 255;
+  --c-on-primary: 0 43 117;
+  --c-primary-container: 0 102 255;
+  --c-on-primary-container: 248 247 255;
+  --c-secondary: 255 255 255;
+  --c-secondary-fixed: 36 255 205;
+  --c-secondary-fixed-dim: 0 224 179;
+  --c-tertiary: 223 183 255;
+  --c-tertiary-container: 163 43 255;
+  --c-on-tertiary-container: 255 245 255;
+  --c-error: 255 180 171;
+  --c-error-container: 147 0 10;
+  --c-on-error: 105 0 5;
+  --c-on-error-container: 255 218 214;
+  color-scheme: dark;
+}
 
 .material-symbols-outlined {
   font-family: 'Material Symbols Outlined';
@@ -26,6 +98,17 @@
 }
 
 @layer base {
+  html,
+  body,
+  #app {
+    min-height: 100%;
+    background: rgb(var(--c-background));
+    color: rgb(var(--c-on-background));
+    transition:
+      background-color 0.2s ease,
+      color 0.2s ease;
+  }
+
   body {
     @apply bg-background text-on-background antialiased;
     font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
@@ -33,11 +116,16 @@
 }
 
 @layer components {
-  /* 玻璃面板：参考图 .glass-panel —— 半透明填充 + 模糊 + 低透明描边 */
+  /* 玻璃面板：半透明填充 + 模糊 + 低透明描边。默认为白天，.dark 下覆盖为暗夜质感。 */
   .glass-panel {
-    background: rgba(255, 255, 255, 0.03);
+    background: rgb(var(--c-surface-container));
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgb(var(--c-outline-variant) / 0.9);
+    box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08);
+  }
+  html[data-theme='dark'] .glass-panel {
+    background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(66, 70, 86, 0.3);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   }
@@ -64,11 +152,10 @@
   select.control {
     @apply appearance-none cursor-pointer pr-9;
   }
-  /* 暗色主题下让原生日期/时间选择器（datetime-local/date）的日历图标与弹层可见可用 */
+  /* 原生日期/时间选择器：color-scheme 由 :root/.dark 继承，控件随主题明暗自适应 */
   input[type='datetime-local'].control,
   input[type='date'].control,
   input[type='time'].control {
-    color-scheme: dark;
     cursor: pointer;
   }
   input[type='datetime-local'].control::-webkit-calendar-picker-indicator,
@@ -76,8 +163,13 @@
   input[type='time'].control::-webkit-calendar-picker-indicator {
     cursor: pointer;
     opacity: 0.7;
-    filter: invert(1);
     transition: opacity 0.15s;
+  }
+  /* 暗夜下把日历图标反色为浅色，保证在深色输入框上可见 */
+  html[data-theme='dark'] input[type='datetime-local'].control::-webkit-calendar-picker-indicator,
+  html[data-theme='dark'] input[type='date'].control::-webkit-calendar-picker-indicator,
+  html[data-theme='dark'] input[type='time'].control::-webkit-calendar-picker-indicator {
+    filter: invert(1);
   }
   input[type='datetime-local'].control::-webkit-calendar-picker-indicator:hover,
   input[type='date'].control::-webkit-calendar-picker-indicator:hover,
@@ -93,6 +185,18 @@
   inset: 0;
   pointer-events: none;
   z-index: -1;
+  background:
+    radial-gradient(40% 40% at 0% 0%, rgba(0, 102, 255, 0.06), transparent 70%),
+    radial-gradient(30% 30% at 100% 100%, rgba(36, 255, 205, 0.05), transparent 70%);
+}
+
+html[data-theme='light'] .bg-glow::before {
+  background:
+    radial-gradient(40% 40% at 0% 0%, rgba(37, 99, 235, 0.04), transparent 70%),
+    radial-gradient(30% 30% at 100% 100%, rgba(12, 155, 120, 0.035), transparent 70%);
+}
+
+html[data-theme='dark'] .bg-glow::before {
   background:
     radial-gradient(40% 40% at 0% 0%, rgba(0, 102, 255, 0.06), transparent 70%),
     radial-gradient(30% 30% at 100% 100%, rgba(36, 255, 205, 0.05), transparent 70%);

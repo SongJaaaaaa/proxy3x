@@ -9,12 +9,12 @@ defineProps<{ title: string; subtitle?: string }>()
 </script>
 
 <template>
-  <div class="bg-glow h-screen overflow-hidden">
+  <div class="bg-glow h-screen overflow-hidden bg-background text-on-background">
     <NavSidebar />
 
     <!-- 顶部操作条 -->
     <header
-      class="h-16 fixed top-0 right-0 w-[calc(100%-240px)] z-30 flex justify-between items-center px-container-padding bg-surface/50 backdrop-blur-md border-b border-outline-variant/10"
+      class="h-16 fixed top-0 right-0 w-[calc(100%-240px)] z-30 flex justify-between items-center px-container-padding bg-surface/95 backdrop-blur-md border-b border-outline-variant/50"
     >
       <div>
         <h2 class="font-headline-md text-headline-md text-on-surface tracking-tight leading-none">{{ title }}</h2>

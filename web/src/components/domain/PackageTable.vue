@@ -7,8 +7,8 @@ import ProgressBar from '@/components/ui/ProgressBar.vue'
 
 /**
  * PackageTable —— 用户套餐密集表格（对应 stitch proxy3x_2）。
- * 列：用户 / 订阅 / 总额度 / 住宅额度 / 总用量 / 娱乐用量 / 住宅用量 /
- *     入口端口 / 绑定家宽 / 备注 / 操作（含小飞机/Clash 下载）。
+ * 列：用户 / 订阅 / 总额度 / 总用量 / 入口用量 /
+ *     入口端口 / 绑定 SOCKS5 / 备注 / 操作（含小飞机/Clash 下载）。
  * 首列(用户)与末列(操作)横向滚动时固定（sticky + 不透明背景）。
  * 纵向滚动在表格容器内部（max-h + overflow），不触发整页滚动。
  * 绑定家宽下拉直接改 → emit bind；编辑/删除 emit。
@@ -21,9 +21,9 @@ const emit = defineEmits<{
 }>()
 
 function upstreamName(id: number | null) {
-  if (!id) return '无绑定'
+  if (!id) return '默认 SOCKS5'
   const u = props.upstreams.find((x) => x.id === id)
-  return u ? u.remark || u.host : '无绑定'
+  return u ? u.remark || u.host : '默认 SOCKS5'
 }
 function onBind(pkg: Package, e: Event) {
   const v = (e.target as HTMLSelectElement).value
@@ -43,18 +43,16 @@ async function copy(url: string, label: string) {
   <div class="glass-panel rounded-xl overflow-hidden flex flex-col min-h-0 flex-1">
     <!-- 横向 + 纵向滚动都在此容器内部 -->
     <div class="overflow-auto flex-1 min-h-0">
-      <table class="w-full border-collapse min-w-[1590px]">
+      <table class="w-full border-collapse min-w-[1360px]">
         <thead class="sticky top-0 z-20">
           <tr class="text-left font-label-sm text-label-sm text-on-surface-variant bg-surface-container/95 backdrop-blur border-b border-outline-variant/20">
             <th class="sticky left-0 z-30 bg-surface-container/95 backdrop-blur px-4 py-3">用户</th>
             <th class="px-3 py-3">订阅</th>
             <th class="px-3 py-3">总额度</th>
-            <th class="px-3 py-3 w-[100px]">住宅额度</th>
             <th class="px-3 py-3 w-[130px]">总用量</th>
-            <th class="px-3 py-3 w-[130px]">娱乐用量</th>
-            <th class="px-3 py-3 w-[130px]">住宅用量</th>
+            <th class="px-3 py-3 w-[130px]">入口用量</th>
             <th class="px-3 py-3 w-[150px]">入口端口</th>
-            <th class="px-3 py-3 w-[220px]">绑定家宽</th>
+            <th class="px-3 py-3 w-[220px]">绑定 SOCKS5</th>
             <th class="px-3 py-3">到期时间</th>
             <th class="px-3 py-3">备注</th>
             <th class="sticky right-0 z-30 bg-surface-container/95 backdrop-blur px-4 py-3 text-center w-[180px]">操作</th>
@@ -83,10 +81,9 @@ async function copy(url: string, label: string) {
             <td class="px-3 py-3">
               <span class="font-code-xs text-code-xs text-on-surface-variant truncate block max-w-[140px]">{{ p.sub_id }}</span>
             </td>
-            <!-- 总额度 / 住宅额度 -->
+            <!-- 总额度 -->
             <td class="px-3 py-3 text-on-surface-variant whitespace-nowrap">{{ gb(p.total_gb, 0) }}</td>
-            <td class="px-3 py-3 text-on-surface-variant whitespace-nowrap">{{ gb(p.residential_gb, 0) }}</td>
-            <!-- 三个用量进度 -->
+            <!-- 用量进度 -->
             <td class="px-3 py-3">
               <div class="flex flex-col gap-1">
                 <span class="font-code-xs text-[11px] text-on-surface">{{ gb(p.total_used_gb, 1) }}</span>
@@ -99,19 +96,13 @@ async function copy(url: string, label: string) {
                 <ProgressBar :percent="percent(p.direct_used_gb, p.total_gb)" />
               </div>
             </td>
-            <td class="px-3 py-3">
-              <div class="flex flex-col gap-1">
-                <span class="font-code-xs text-[11px] text-on-surface">{{ gb(p.residential_used_gb, 1) }}</span>
-                <ProgressBar :percent="percent(p.residential_used_gb, p.residential_gb)" />
-              </div>
-            </td>
             <!-- 入口端口（长方形圆角边框芯片，单行紧凑） -->
             <td class="px-3 py-3">
               <div class="flex flex-col items-start gap-1">
                 <span
                   v-if="p.direct_port"
                   class="px-2 py-0.5 rounded-md border border-primary/30 bg-primary/10 text-primary font-code-xs text-[11px] leading-tight whitespace-nowrap"
-                >娱 {{ p.direct_port }}</span>
+                >入口 {{ p.direct_port }}</span>
                 <span
                   v-if="p.residential_port"
                   class="px-2 py-0.5 rounded-md border border-tertiary-container/30 bg-tertiary-container/10 text-tertiary-container font-code-xs text-[11px] leading-tight whitespace-nowrap"
@@ -119,14 +110,14 @@ async function copy(url: string, label: string) {
                 <span v-if="!p.direct_port && !p.residential_port" class="text-outline text-sm">—</span>
               </div>
             </td>
-            <!-- 绑定家宽 -->
+            <!-- 绑定 SOCKS5 -->
             <td class="px-3 py-3">
               <select
                 class="control !h-9 !px-2 w-full min-w-[200px] text-sm"
                 :value="p.upstream_id ?? ''"
                 @change="onBind(p, $event)"
               >
-                <option value="">无绑定</option>
+                <option value="">默认 SOCKS5</option>
                 <option v-for="u in upstreams" :key="u.id" :value="u.id">{{ upstreamName(u.id) }}</option>
               </select>
             </td>
@@ -177,7 +168,7 @@ async function copy(url: string, label: string) {
             </td>
           </tr>
           <tr v-if="!packages.length">
-            <td colspan="12" class="py-16 text-center text-outline font-body-md text-sm">
+            <td colspan="10" class="py-16 text-center text-outline font-body-md text-sm">
               没有匹配的套餐。
             </td>
           </tr>

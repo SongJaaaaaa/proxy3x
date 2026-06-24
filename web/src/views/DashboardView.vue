@@ -23,7 +23,7 @@ const s = computed(() => store.summary)
     <!-- 汇总卡 -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-panel-gap">
       <StatCard icon="inventory_2" tone="blue" label="套餐数" :value="String(s?.package_count ?? 0)" />
-      <StatCard icon="lan" tone="green" label="家宽数" :value="String(s?.upstream_count ?? 0)" />
+      <StatCard icon="lan" tone="green" label="SOCKS5 数" :value="String(s?.upstream_count ?? 0)" />
       <StatCard
         icon="data_usage"
         tone="purple"
@@ -31,7 +31,7 @@ const s = computed(() => store.summary)
         :value="gb(s?.total_used_gb, 1)"
         :unit="`/ ${gb(s?.total_limit_gb, 0)}`"
       />
-      <StatCard icon="home" tone="red" label="住宅用量" :value="gb(s?.residential_used_gb, 1)" />
+      <StatCard icon="route" tone="red" label="链式用量" :value="gb(s?.total_used_gb, 1)" />
     </div>
 
     <!-- 用量图表（整行） -->
