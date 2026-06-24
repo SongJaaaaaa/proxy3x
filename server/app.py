@@ -1537,6 +1537,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_text(self, text, status=200, content_type="text/plain; charset=utf-8", headers=None):
+        body = str(text or "").encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if headers:
+            for key, value in headers.items():
+                self.send_header(key, value)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     def public_base_url(self):
         host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").strip()
         if not host:
@@ -1548,17 +1560,17 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         token = (params.get("token") or params.get("sub_id") or [""])[0].strip()
         if not token:
-            self.send_error(404)
+            self.send_text("缺少订阅 token", 404)
             return
         with connect_manager_db() as con:
             package = con.execute("SELECT * FROM packages WHERE sub_id = ?", (token,)).fetchone()
         if not package or not package["enabled"] or package_is_expired(package):
-            self.send_error(403)
+            self.send_text("订阅不存在或已失效", 403)
             return
         kind = subscription_kind(self.headers, params)
         text, content_type = package_subscription_response(package, kind)
         if not text:
-            self.send_error(404)
+            self.send_text("订阅内容为空", 404)
             return
         body = text.encode("utf-8")
         self.send_response(200)
