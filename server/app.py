@@ -987,11 +987,6 @@ def apply_xray_routes():
             managed_ports.add(int(p["residential_port"]))
     tag_by_port = inbound_tag_map()
     package_tags = {tag_by_port.get(port, f"inbound-{port}") for port in package_ports}
-    used_upstream_ids = {
-        int(p["upstream_id"])
-        for p in packages
-        if p["upstream_id"] and (p["direct_port"] or p["residential_port"])
-    }
     xray = fetch_xray_template()
     xray.setdefault("outbounds", [])
     xray.setdefault("routing", {})
@@ -1006,8 +1001,7 @@ def apply_xray_routes():
     if package_ports:
         xray["outbounds"].append(block_outbound())
     for row in upstreams:
-        if int(row["id"]) in used_upstream_ids:
-            xray["outbounds"].append(xray_outbound_for_upstream(row))
+        xray["outbounds"].append(xray_outbound_for_upstream(row))
 
     old_rules = xray["routing"].get("rules") or []
     kept_rules = []
