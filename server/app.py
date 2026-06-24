@@ -44,7 +44,9 @@ GB = 1024 * 1024 * 1024
 SESSION_MAX_AGE = 86400
 DEFAULT_PACKAGE_EXPIRE_SECONDS = 30 * 86400
 DEFAULT_PACKAGE_TOTAL_GB = 500
-DEFAULT_NODE_NAME = "高速节点"
+DEFAULT_NODE_NAME = "🇺🇸 住宅家宽"
+LEGACY_NODE_NAMES = {"高速节点", "高速流量"}
+LEGACY_SINGLE_NODE_NAMES = LEGACY_NODE_NAMES | {"🇺🇸 娱乐流量"}
 BLOCK_OUTBOUND_TAG = "proxy3x-block"
 
 
@@ -551,11 +553,17 @@ def clash_node(entry, node_name):
 
 
 def package_nodes(package):
-    nodes = []
+    entries = []
     for key in ("direct_entry_json", "residential_entry_json"):
         entry = json.loads(package[key] or "{}")
         if entry:
-            nodes.append((entry.get("node_name") or DEFAULT_NODE_NAME, entry))
+            entries.append((entry.get("node_name") or DEFAULT_NODE_NAME, entry))
+    nodes = []
+    single_node = len(entries) == 1
+    for name, entry in entries:
+        if name in LEGACY_NODE_NAMES or (single_node and name in LEGACY_SINGLE_NODE_NAMES):
+            name = DEFAULT_NODE_NAME
+        nodes.append((name, entry))
     return nodes
 
 
@@ -1805,6 +1813,7 @@ def main():
     parser.add_argument("--port", type=int, default=32180)
     parser.add_argument("--init", action="store_true")
     parser.add_argument("--enforce", action="store_true")
+    parser.add_argument("--regenerate", action="store_true")
     args = parser.parse_args()
 
     init_db()
@@ -1817,6 +1826,10 @@ def main():
     if args.enforce:
         changed = enforce_quotas()
         print(json.dumps({"ok": True, "changed": changed}, ensure_ascii=False))
+        return
+    if args.regenerate:
+        generate_subscriptions()
+        print(json.dumps({"ok": True}, ensure_ascii=False))
         return
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
