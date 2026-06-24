@@ -924,12 +924,41 @@ def inbound_tag_map():
     return result
 
 
-def fetch_xray_template(client):
-    result = client.request("POST", "/panel/xray/")
-    if not isinstance(result, dict) or not result.get("success"):
+def fetch_xray_template():
+    if not CHAIN_DB.exists():
+        raise RuntimeError("没有找到 3x-ui 数据库")
+    con = sqlite3.connect(f"file:{CHAIN_DB}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute("SELECT value FROM settings WHERE key = 'xrayTemplateConfig' LIMIT 1").fetchone()
+    finally:
+        con.close()
+    if not row or not row["value"]:
         raise RuntimeError("读取 Xray 设置失败")
-    obj = json.loads(result["obj"])
-    return obj.get("xraySetting") or {}, obj.get("outboundTestUrl") or OUTBOUND_TEST_URL
+    try:
+        return json.loads(row["value"])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Xray 设置不是有效 JSON") from exc
+
+
+def write_xray_template(xray):
+    if not CHAIN_DB.exists():
+        raise RuntimeError("没有找到 3x-ui 数据库")
+    backup_file(CHAIN_DB, "before-proxy3x-routes")
+    con = sqlite3.connect(CHAIN_DB)
+    try:
+        cur = con.execute(
+            "UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'",
+            (pretty_json(xray),),
+        )
+        if cur.rowcount == 0:
+            con.execute(
+                "INSERT INTO settings(key, value) VALUES ('xrayTemplateConfig', ?)",
+                (pretty_json(xray),),
+            )
+        con.commit()
+    finally:
+        con.close()
 
 
 def apply_xray_routes():
@@ -963,8 +992,7 @@ def apply_xray_routes():
         for p in packages
         if p["upstream_id"] and (p["direct_port"] or p["residential_port"])
     }
-    client = get_panel_client()
-    xray, test_url = fetch_xray_template(client)
+    xray = fetch_xray_template()
     xray.setdefault("outbounds", [])
     xray.setdefault("routing", {})
     xray["routing"].setdefault("rules", [])
@@ -1016,12 +1044,8 @@ def apply_xray_routes():
 
     insert_at = 1 if kept_rules and kept_rules[0].get("inboundTag") == ["api"] else 0
     xray["routing"]["rules"] = kept_rules[:insert_at] + new_rules + kept_rules[insert_at:]
-    client.post_form(
-        "/panel/xray/update",
-        {"xraySetting": pretty_json(xray), "outboundTestUrl": test_url},
-    )
-    restart_xray(client)
-    log_event("信息", f"已更新链式路由 {len(new_rules)} 条")
+    write_xray_template(xray)
+    restart_xui_container(f"已更新链式路由 {len(new_rules)} 条", "信息")
 
 
 def traffic_map():
@@ -1054,8 +1078,12 @@ def restart_xray(client=None):
     except Exception as exc:
         if "HTTP Error 404" not in str(exc):
             raise
+    return restart_xui_container("3x-ui 重启接口 404")
+
+
+def restart_xui_container(reason, level="警告"):
     if not XUI_CONTAINER:
-        raise RuntimeError("3x-ui 重启接口 404，且未配置 Docker 容器名")
+        raise RuntimeError(f"{reason}，且未配置 Docker 容器名")
     try:
         result = subprocess.run(
             ["docker", "restart", XUI_CONTAINER],
@@ -1064,13 +1092,25 @@ def restart_xray(client=None):
             timeout=60,
             check=False,
         )
-    except Exception as fallback_exc:
-        raise RuntimeError(f"3x-ui 重启接口 404，Docker 兜底失败：{fallback_exc}") from fallback_exc
+    except Exception as exc:
+        raise RuntimeError(f"{reason}，Docker 兜底失败：{exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"3x-ui 重启接口 404，Docker 兜底失败：{detail or result.returncode}")
-    log_event("警告", f"3x-ui 重启接口 404，已重启 Docker 容器 {XUI_CONTAINER} 兜底")
+        raise RuntimeError(f"{reason}，Docker 兜底失败：{detail or result.returncode}")
+    log_event(level, f"{reason}，已重启 Docker 容器 {XUI_CONTAINER} 兜底")
     return "docker"
+
+
+def refresh_routes_best_effort(action):
+    try:
+        apply_xray_routes()
+        return True
+    except Exception as exc:
+        log_event("警告", f"{action}：路由刷新失败：{exc}")
+        if "HTTP Error 404" in str(exc):
+            restart_xui_container(f"{action}：3x-ui 路由接口 404")
+            return False
+        raise
 
 
 def delete_xui_inbounds(ports, emails):
@@ -1138,7 +1178,7 @@ def delete_package(package_id):
     removed = delete_xui_inbounds(ports, emails)
     delete_subscription_files(package["sub_id"])
     generate_subscriptions()
-    apply_xray_routes()
+    refresh_routes_best_effort(f"{package['name']} 删除后刷新")
     log_event("信息", f"已删除用户套餐 {package['name']}，禁用入站 {disabled} 个，清理入站 {removed} 个")
     return "已删除套餐，旧订阅节点已失效"
 
@@ -1148,7 +1188,7 @@ def finish_package_delete(package):
         [package.get("direct_port"), package.get("residential_port")],
         [package.get("direct_email"), package.get("residential_email")],
     )
-    apply_xray_routes()
+    refresh_routes_best_effort(f"{package['name']} 删除后台清理")
     generate_subscriptions()
     log_event("信息", f"{package['name']} 删除后台清理完成，清理入站 {removed_inbounds} 个")
 
@@ -1414,9 +1454,9 @@ def create_package(payload):
 
 
 def finish_package_create(package_id):
-    apply_xray_routes()
+    route_ok = refresh_routes_best_effort("创建后刷新")
     generate_subscriptions()
-    msg = "链式路由和订阅已刷新"
+    msg = "链式路由和订阅已刷新" if route_ok else "订阅已刷新，路由接口 404 已重启容器兜底"
     with connect_manager_db() as con:
         row = con.execute("SELECT name FROM packages WHERE id = ?", (package_id,)).fetchone()
     if row:
