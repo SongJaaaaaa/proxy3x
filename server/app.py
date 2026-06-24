@@ -863,18 +863,18 @@ def test_socks_proxy(upstream):
         sock.sendall(bytes([5, 2, 0, 2]))
         method = sock.recv(2)
         if len(method) != 2 or method[0] != 5:
-            raise RuntimeError("SOCKS5 握手失败")
+            raise RuntimeError("握手失败")
         if method[1] == 2:
             sock.sendall(bytes([1, len(user)]) + user + bytes([len(pwd)]) + pwd)
             auth = sock.recv(2)
             if len(auth) != 2 or auth[1] != 0:
-                raise RuntimeError("SOCKS5 账号验证失败")
+                raise RuntimeError("账号验证失败")
         elif method[1] != 0:
-            raise RuntimeError("SOCKS5 不支持的认证方式")
+            raise RuntimeError("不支持的认证方式")
         sock.sendall(bytes([5, 1, 0, 3, len(host)]) + host + (443).to_bytes(2, "big"))
         reply = sock.recv(10)
         if len(reply) < 2 or reply[1] != 0:
-            raise RuntimeError("SOCKS5 连接目标失败")
+            raise RuntimeError("连接目标失败")
 
 
 def check_upstream(upstream):
@@ -882,7 +882,8 @@ def check_upstream(upstream):
         test_socks_proxy(upstream)
         return "socks", ""
     except Exception as exc:
-        raise RuntimeError(f"SOCKS5: {type(exc).__name__}") from exc
+        msg = str(exc) or type(exc).__name__
+        raise RuntimeError(f"SOCKS5: {msg}") from exc
 
 
 def xray_outbound_for_upstream(row):
