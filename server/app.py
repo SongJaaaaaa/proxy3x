@@ -11,6 +11,7 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ CHAIN_DB = CHAIN_DIR / "db" / "x-ui.db"
 DEPLOYMENT_PATH = CHAIN_DIR / "chain-deployment.json"
 SUBSCRIPTIONS_DIR = CHAIN_DIR / "subscriptions"
 PANEL_BASE_URL = os.environ.get("PROXY3X_PANEL_URL", "http://127.0.0.1:32080")
+XUI_CONTAINER = os.environ.get("PROXY3X_XUI_CONTAINER", "3x-ui-chain")
 DEFAULT_SERVER = os.environ.get("PROXY3X_SERVER", "vpn.sjiaa.cc.cd")
 ALT_SUBSCRIPTION_DOMAIN = os.environ.get("PROXY3X_ALT_SUBSCRIPTION_DOMAIN", "vpn-us.songjiaaa.ccwu.cc")
 SHADOWROCKET_NODE_SERVER = os.environ.get("PROXY3X_SHADOWROCKET_NODE_SERVER", "154.44.9.60")
@@ -1018,7 +1020,7 @@ def apply_xray_routes():
         "/panel/xray/update",
         {"xraySetting": pretty_json(xray), "outboundTestUrl": test_url},
     )
-    client.post_json("/panel/api/server/restartXrayService")
+    restart_xray(client)
     log_event("信息", f"已更新链式路由 {len(new_rules)} 条")
 
 
@@ -1044,9 +1046,31 @@ def traffic_map():
     return result
 
 
-def restart_xray():
-    client = get_panel_client()
-    client.post_json("/panel/api/server/restartXrayService")
+def restart_xray(client=None):
+    try:
+        client = client or get_panel_client()
+        client.post_json("/panel/api/server/restartXrayService")
+        return "api"
+    except Exception as exc:
+        if "HTTP Error 404" not in str(exc):
+            raise
+    if not XUI_CONTAINER:
+        raise RuntimeError("3x-ui 重启接口 404，且未配置 Docker 容器名")
+    try:
+        result = subprocess.run(
+            ["docker", "restart", XUI_CONTAINER],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except Exception as fallback_exc:
+        raise RuntimeError(f"3x-ui 重启接口 404，Docker 兜底失败：{fallback_exc}") from fallback_exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"3x-ui 重启接口 404，Docker 兜底失败：{detail or result.returncode}")
+    log_event("警告", f"3x-ui 重启接口 404，已重启 Docker 容器 {XUI_CONTAINER} 兜底")
+    return "docker"
 
 
 def delete_xui_inbounds(ports, emails):
@@ -1115,7 +1139,6 @@ def delete_package(package_id):
     delete_subscription_files(package["sub_id"])
     generate_subscriptions()
     apply_xray_routes()
-    restart_xray()
     log_event("信息", f"已删除用户套餐 {package['name']}，禁用入站 {disabled} 个，清理入站 {removed} 个")
     return "已删除套餐，旧订阅节点已失效"
 
@@ -1127,7 +1150,6 @@ def finish_package_delete(package):
     )
     apply_xray_routes()
     generate_subscriptions()
-    restart_xray()
     log_event("信息", f"{package['name']} 删除后台清理完成，清理入站 {removed_inbounds} 个")
 
 
@@ -1725,10 +1747,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
         match = re.match(r"^/api/packages/(\d+)$", path)
         if match and self.command == "DELETE":
+            package_id = int(match.group(1))
             try:
-                msg = delete_package(int(match.group(1)))
+                msg = delete_package(package_id)
             except ValueError as exc:
                 self.send_json({"ok": False, "message": str(exc)}, 404)
+                return
+            except Exception as exc:
+                log_event("警告", f"删除套餐失败：{exc}")
+                self.send_json({"ok": False, "message": f"删除失败：{exc}"}, 500)
                 return
             self.send_json({"ok": True, "message": msg})
             return
