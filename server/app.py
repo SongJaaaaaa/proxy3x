@@ -550,13 +550,19 @@ def clash_node(entry, node_name):
       short-id: \"{entry["short_id"]}\""""
 
 
+def package_nodes(package):
+    nodes = []
+    for key in ("direct_entry_json", "residential_entry_json"):
+        entry = json.loads(package[key] or "{}")
+        if entry:
+            nodes.append((entry.get("node_name") or DEFAULT_NODE_NAME, entry))
+    return nodes
+
+
 def build_clash_yaml(package):
     if not package["enabled"] or package_is_expired(package):
         return ""
-    nodes = []
-    direct = json.loads(package["direct_entry_json"] or "{}")
-    if direct:
-        nodes.append((direct.get("node_name") or DEFAULT_NODE_NAME, direct))
+    nodes = package_nodes(package)
     if not nodes:
         return ""
 
@@ -599,10 +605,7 @@ rules:
 def build_shadowrocket_list(package):
     if not package["enabled"] or package_is_expired(package):
         return ""
-    lines = []
-    direct = json.loads(package["direct_entry_json"] or "{}")
-    if direct:
-        lines.append(vless_uri(direct, direct.get("node_name") or DEFAULT_NODE_NAME))
+    lines = [vless_uri(entry, name) for name, entry in package_nodes(package)]
     return "\n".join(lines) + ("\n" if lines else "")
 
 
