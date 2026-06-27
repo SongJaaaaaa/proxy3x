@@ -716,6 +716,7 @@ def clash_node(entry, node_name):
 
 
 def package_nodes(package):
+    package = dict(package)
     entries = []
     node_specs = [
         ("direct_entry_json", bool(package.get("direct_node_enabled", 1))),
