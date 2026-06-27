@@ -47,6 +47,7 @@ from config import (
     INITIAL_CREDENTIALS_PATH,
     LEGACY_NODE_NAMES,
     LEGACY_SINGLE_NODE_NAMES,
+    NODE_SERVER,
     OUTBOUND_TEST_URL,
     PACKAGE_TYPE_CHAIN,
     PACKAGE_TYPE_MIXED,
@@ -555,6 +556,11 @@ def server_host():
     return data.get("server") or DEFAULT_SERVER
 
 
+def node_host():
+    data = read_deployment()
+    return data.get("node_server") or NODE_SERVER
+
+
 def load_rules():
     text = read_text(RULES_PATH)
     rules = []
@@ -722,13 +728,13 @@ def vless_uri(entry, node_name):
         "type": "tcp",
     }
     query = "&".join(f"{key}={quote(str(value), safe='')}" for key, value in params.items())
-    return f"vless://{entry['uuid']}@{server_host()}:{entry['port']}?{query}#{quote(node_name)}"
+    return f"vless://{entry['uuid']}@{node_host()}:{entry['port']}?{query}#{quote(node_name)}"
 
 
 def clash_node(entry, node_name):
     return f"""  - name: \"{node_name}\"
     type: vless
-    server: \"{server_host()}\"
+    server: \"{node_host()}\"
     port: {int(entry["port"])}
     uuid: \"{entry["uuid"]}\"
     network: tcp
@@ -978,6 +984,8 @@ def delete_subscription_files(sub_id):
 
 def update_deployment_manager_metadata():
     data = read_deployment()
+    data.setdefault("server", DEFAULT_SERVER)
+    data.setdefault("node_server", NODE_SERVER)
     with connect_manager_db() as con:
         packages = con.execute("SELECT * FROM packages ORDER BY id").fetchall()
         upstreams = con.execute("SELECT * FROM upstreams ORDER BY id").fetchall()
@@ -1478,7 +1486,7 @@ def next_socks_port(con):
 
 
 def socks_endpoint_uri(row, host=None):
-    host = host or server_host()
+    host = host or node_host()
     user = quote(row["username"] or "", safe="")
     pwd = quote(row["password"] or "", safe="")
     return f"socks5://{user}:{pwd}@{host}:{int(row['listen_port'])}"
@@ -1626,7 +1634,7 @@ def node_public(row):
 
 def socks_factory_data(source_id=None, base_url=None):
     init_db()
-    host = server_host()
+    host = node_host()
     with connect_manager_db() as con:
         if source_id:
             sources = [con.execute("SELECT * FROM socks_sources WHERE id = ?", (source_id,)).fetchone()]
@@ -1931,8 +1939,14 @@ def mask_secret(value):
 
 def upstream_public(row):
     item = dict(row)
+    try:
+        internal = internal_socks_endpoint(item)
+    except Exception:
+        internal = None
     display_name = upstream_display_name(item)
     item["display_name"] = display_name
+    item["socks5_name"] = item.get("remark") or item.get("assigned_to") or f"SOCKS5 #{item.get('id')}"
+    item["source_node_name"] = internal["node_name"] if internal else ""
     item["password"] = mask_secret(item.get("password"))
     item["username"] = mask_secret(item.get("username"))
     quota_gb = float(item.get("quota_gb") or 0)
@@ -3174,7 +3188,7 @@ class Handler(BaseHTTPRequestHandler):
                         ).fetchall()
                     if not items:
                         raise ValueError("还没有生成 SOCKS5")
-                    lines = [endpoint_public(e, server_host(), True)["uri"] for e in items]
+                    lines = [endpoint_public(e, node_host(), True)["uri"] for e in items]
                     self.send_json({"ok": True, "data": {"text": "\n".join(lines)}, "message": f"已生成 {len(lines)} 条"})
                     return
             except ValueError as exc:
@@ -3212,7 +3226,7 @@ class Handler(BaseHTTPRequestHandler):
                         ).fetchone()
                     if not row:
                         raise ValueError("SOCKS5 不存在")
-                    self.send_json({"ok": True, "data": endpoint_public(row, server_host(), True)})
+                    self.send_json({"ok": True, "data": endpoint_public(row, node_host(), True)})
                     return
             except ValueError as exc:
                 self.send_json({"ok": False, "message": str(exc)}, 404)

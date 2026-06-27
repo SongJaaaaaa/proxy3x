@@ -23,7 +23,9 @@ function upstreamName(id: number | null) {
   if (!id) return '默认 SOCKS5'
   const u = props.upstreams.find((x) => x.id === id)
   if (!u) return '默认 SOCKS5'
-  return `${u.display_name || u.remark || u.host}${u.expired ? '（已到期）' : ''}`
+  const socksName = u.socks5_name || u.remark || u.host
+  const nodeName = u.source_node_name || u.display_name || u.host
+  return `${socksName} / ${nodeName}${u.expired ? '（已到期）' : ''}`
 }
 function bindingNames(pkg: Package) {
   if (pkg.bindings?.length) return pkg.bindings.map((item) => item.display_name || upstreamName(item.upstream_id))

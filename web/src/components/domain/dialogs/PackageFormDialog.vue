@@ -46,7 +46,9 @@ const filteredUpstreams = computed(() => {
   const k = upstreamKeyword.value.trim().toLowerCase()
   if (!k) return availableUpstreams.value
   return availableUpstreams.value.filter((u) =>
-    `${u.display_name || u.remark || ''} ${u.host || ''} ${u.assigned_to || ''}`.toLowerCase().includes(k),
+    `${u.socks5_name || ''} ${u.source_node_name || ''} ${u.display_name || ''} ${u.remark || ''} ${u.host || ''} ${u.assigned_to || ''}`
+      .toLowerCase()
+      .includes(k),
   )
 })
 const selectedSet = computed(() => new Set(form.upstream_ids))
@@ -78,7 +80,11 @@ function setError(msg: string) {
 defineExpose({ setError })
 
 function upstreamName(u: Upstream) {
-  return u.display_name || u.remark || u.host || `SOCKS5 #${u.id}`
+  return u.socks5_name || u.remark || u.host || `SOCKS5 #${u.id}`
+}
+
+function nodeName(u: Upstream) {
+  return u.source_node_name || u.display_name || u.host || '未匹配订阅节点'
 }
 
 function toggleUpstream(id: number) {
@@ -178,7 +184,8 @@ function submit() {
               <Icon name="check" :size="13" />
             </span>
             <span class="min-w-0 flex-1">
-              <span class="block text-sm text-on-surface truncate">{{ upstreamName(u) }}</span>
+              <span class="block text-sm text-on-surface truncate">SOCKS5：{{ upstreamName(u) }}</span>
+              <span class="block text-xs text-on-surface-variant truncate">节点：{{ nodeName(u) }}</span>
               <span class="block font-code-xs text-[11px] text-outline truncate">#{{ u.id }} · {{ u.protocol }} · {{ u.status }}</span>
             </span>
           </button>

@@ -62,6 +62,8 @@ export interface Upstream {
   password: string // 已遮罩
   remark: string
   display_name: string
+  socks5_name: string
+  source_node_name: string
   assigned_to: string
   status: string // 可用 / 不可用 / 未检测
   last_error: string
