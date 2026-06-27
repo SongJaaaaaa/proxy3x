@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+import ipaddress
 from datetime import datetime
 from http import cookies
 from http.cookiejar import CookieJar
@@ -788,7 +789,11 @@ def package_binding_rows(package_id):
                    u.remark AS upstream_remark, u.expires_at AS upstream_expires_at
             FROM package_bindings b
             JOIN upstreams u ON u.id = b.upstream_id
+            LEFT JOIN socks_endpoints e ON e.listen_port = u.port AND e.username = u.username AND e.password = u.password
+            LEFT JOIN socks_nodes n ON n.id = e.node_id
             WHERE b.package_id = ? AND b.enabled = 1
+              AND u.status != '不可用'
+              AND (n.id IS NULL OR n.status != '不可用')
             ORDER BY b.sort_order, b.id
             """,
             (package_id,),
@@ -1513,12 +1518,14 @@ def refresh_socks_source(source_id):
             if not nodes:
                 raise RuntimeError("订阅内容里没有可识别节点")
             for node in nodes:
+                node_error = node_static_error(node)
+                node_status = "不可用" if node_error else "未检测"
                 con.execute(
                     """
                     INSERT INTO socks_nodes(
                       source_id, node_key, name, protocol, server, port, raw_uri,
-                      config_json, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '未检测', ?, ?)
+                      config_json, status, last_error, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source_id, node_key) DO UPDATE SET
                       name = excluded.name,
                       protocol = excluded.protocol,
@@ -1526,6 +1533,8 @@ def refresh_socks_source(source_id):
                       port = excluded.port,
                       raw_uri = excluded.raw_uri,
                       config_json = excluded.config_json,
+                      status = excluded.status,
+                      last_error = excluded.last_error,
                       updated_at = excluded.updated_at
                     """,
                     (
@@ -1537,6 +1546,8 @@ def refresh_socks_source(source_id):
                         int(node["port"] or 0),
                         node["raw_uri"],
                         json_dumps(node["config"]),
+                        node_status,
+                        node_error,
                         current,
                         current,
                     ),
@@ -1567,9 +1578,9 @@ def generate_socks_endpoints(source_id, expires_at=None):
         src = con.execute("SELECT * FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
         if not src:
             raise ValueError("订阅源不存在")
-        nodes = con.execute("SELECT * FROM socks_nodes WHERE source_id = ? ORDER BY id", (source_id,)).fetchall()
+        nodes = con.execute("SELECT * FROM socks_nodes WHERE source_id = ? AND status != '不可用' ORDER BY id", (source_id,)).fetchall()
         if not nodes:
-            raise ValueError("请先刷新订阅，解析出节点后再生成 SOCKS5")
+            raise ValueError("没有可用节点，请先刷新订阅或检查节点解析")
         quota = round(float(src["total_gb"] or 0) / len(nodes), 3) if float(src["total_gb"] or 0) > 0 else 0
         made = 0
         for node in nodes:
@@ -1956,6 +1967,9 @@ def upstream_public(row):
     item["display_name"] = display_name
     item["socks5_name"] = item.get("remark") or item.get("assigned_to") or f"SOCKS5 #{item.get('id')}"
     item["source_node_name"] = internal["node_name"] if internal else ""
+    if internal and internal["node_status"] == "不可用":
+        item["status"] = "不可用"
+        item["last_error"] = internal["node_last_error"] or "订阅节点不可用"
     item["password"] = mask_secret(item.get("password"))
     item["username"] = mask_secret(item.get("username"))
     quota_gb = float(item.get("quota_gb") or 0)
@@ -1980,6 +1994,27 @@ def tcp_connect(host, port, timeout=8):
     sock = socket.create_connection((host, int(port)), timeout=timeout)
     sock.settimeout(timeout)
     return sock
+
+
+def node_static_error(node):
+    host = node.get("server") or ""
+    try:
+        infos = socket.getaddrinfo(host, int(node.get("port") or 0), socket.AF_INET, socket.SOCK_STREAM)
+    except Exception as exc:
+        return f"DNS 解析失败：{exc}"
+    ips = []
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        ips.append(ip)
+        if addr.is_loopback or addr.is_unspecified:
+            return f"节点域名解析到不可用地址 {ip}"
+    if not ips:
+        return "DNS 没有返回 IPv4 地址"
+    return ""
 
 
 def test_http_proxy(upstream):
@@ -2030,7 +2065,8 @@ def internal_socks_endpoint(upstream):
     with connect_manager_db() as con:
         row = con.execute(
             """
-            SELECT e.*, s.enabled AS source_enabled, n.name AS node_name
+            SELECT e.*, s.enabled AS source_enabled, n.name AS node_name,
+                   n.status AS node_status, n.last_error AS node_last_error
             FROM socks_endpoints e
             JOIN socks_sources s ON s.id = e.source_id
             JOIN socks_nodes n ON n.id = e.node_id
@@ -2044,7 +2080,10 @@ def internal_socks_endpoint(upstream):
 
 
 def check_upstream(upstream):
-    if internal_socks_endpoint(upstream):
+    internal = internal_socks_endpoint(upstream)
+    if internal:
+        if internal["node_status"] == "不可用":
+            raise RuntimeError(internal["node_last_error"] or "订阅节点不可用")
         return "socks", ""
     try:
         test_socks_proxy(upstream)
