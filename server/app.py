@@ -49,6 +49,7 @@ SOCKS_PORT_END = int(os.environ.get("PROXY3X_SOCKS_PORT_END", "33999"))
 SING_BOX_API_LISTEN = os.environ.get("PROXY3X_SING_BOX_API_LISTEN", "127.0.0.1:33000")
 SING_BOX_SERVICE = os.environ.get("PROXY3X_SING_BOX_SERVICE", "proxy3x-socks-factory")
 STATSQUERY_BIN = os.environ.get("PROXY3X_STATSQUERY_BIN", "xray")
+ENABLE_SING_BOX_STATS = os.environ.get("PROXY3X_ENABLE_SING_BOX_STATS", "").lower() in ("1", "true", "yes", "on")
 OUTBOUND_TEST_URL = "https://www.google.com/generate_204"
 GB = 1024 * 1024 * 1024
 SESSION_MAX_AGE = 86400
@@ -1572,7 +1573,9 @@ def write_sing_box_config():
         "inbounds": inbounds,
         "outbounds": outbounds,
         "route": {"rules": rules, "final": "block"},
-        "experimental": {
+    }
+    if ENABLE_SING_BOX_STATS:
+        cfg["experimental"] = {
             "v2ray_api": {
                 "listen": SING_BOX_API_LISTEN,
                 "stats": {
@@ -1582,8 +1585,7 @@ def write_sing_box_config():
                     "users": [row["username"] for row in rows],
                 },
             }
-        },
-    }
+        }
     write_text(SING_BOX_CONFIG_PATH, pretty_json(cfg))
     return len(inbounds)
 
