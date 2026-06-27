@@ -751,7 +751,7 @@ def package_nodes(package):
             entry = json.loads(row["entry_json"] or "{}")
             if not entry:
                 continue
-            name = row["display_name"] or entry.get("node_name") or DEFAULT_NODE_NAME
+            name = binding_display_name(row) or entry.get("node_name") or DEFAULT_NODE_NAME
             nodes.append((name, entry))
         return nodes
     entries = []
@@ -778,7 +778,8 @@ def package_binding_rows(package_id):
     with connect_manager_db() as con:
         return con.execute(
             """
-            SELECT b.*, u.host, u.remark AS upstream_remark
+            SELECT b.*, u.protocol, u.host, u.port AS upstream_port, u.username, u.password,
+                   u.remark AS upstream_remark, u.expires_at AS upstream_expires_at
             FROM package_bindings b
             JOIN upstreams u ON u.id = b.upstream_id
             WHERE b.package_id = ? AND b.enabled = 1
@@ -792,7 +793,8 @@ def package_binding_all_rows(package_id):
     with connect_manager_db() as con:
         return con.execute(
             """
-            SELECT b.*, u.host, u.remark AS upstream_remark
+            SELECT b.*, u.protocol, u.host, u.port AS upstream_port, u.username, u.password,
+                   u.remark AS upstream_remark, u.expires_at AS upstream_expires_at
             FROM package_bindings b
             JOIN upstreams u ON u.id = b.upstream_id
             WHERE b.package_id = ?
@@ -808,7 +810,7 @@ def package_binding_public_rows(package_id):
         {
             "id": row["id"],
             "upstream_id": row["upstream_id"],
-            "display_name": row["display_name"] or row["upstream_remark"] or row["host"] or "节点",
+            "display_name": binding_display_name(row),
             "port": row["port"],
             "email": row["email"],
             "sort_order": row["sort_order"],
@@ -816,6 +818,23 @@ def package_binding_public_rows(package_id):
         }
         for row in rows
     ]
+
+
+def binding_upstream(row):
+    return {
+        "id": row["upstream_id"],
+        "protocol": row["protocol"],
+        "host": row["host"],
+        "port": row["upstream_port"],
+        "username": row["username"],
+        "password": row["password"],
+        "remark": row["upstream_remark"],
+        "expires_at": row["upstream_expires_at"],
+    }
+
+
+def binding_display_name(row):
+    return row["display_name"] or upstream_display_name(binding_upstream(row))
 
 
 def package_runtime_entries(package):
