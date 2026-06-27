@@ -24,6 +24,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from config import (
     ALT_SUBSCRIPTION_DOMAIN,
     APP_DIR,
