@@ -96,6 +96,82 @@ export interface DashboardData {
   events: EventItem[]
 }
 
+export interface SocksNode {
+  id: number
+  source_id: number
+  node_key: string
+  name: string
+  protocol: string
+  server: string
+  port: number
+  status: string
+  latency_ms: number
+  last_error: string
+  created_at: number
+  updated_at: number
+}
+
+export interface SocksEndpoint {
+  id: number
+  source_id: number
+  node_id: number
+  listen_port: number
+  username: string
+  password: string
+  quota_gb: number
+  quota_bytes: number
+  upload_bytes: number
+  download_bytes: number
+  used_bytes: number
+  used_gb: number
+  usage_percent: number | null
+  enabled: number
+  expired: boolean
+  expires_at: number
+  expires_at_text: string
+  remark: string
+  node_name: string
+  protocol: string
+  server: string
+  node_port: number
+  uri: string
+}
+
+export interface SocksSource {
+  id: number
+  name: string
+  url: string
+  total_gb: number
+  enabled: number
+  node_count: number
+  endpoint_count: number
+  last_refresh_at: number
+  last_error: string
+  created_at: number
+  updated_at: number
+  used_bytes: number
+  used_gb: number
+  endpoint_quota_bytes: number
+  endpoint_quota_gb: number
+  usage_percent: number | null
+  detail_url: string
+  nodes: SocksNode[]
+  endpoints: SocksEndpoint[]
+}
+
+export interface CreateSocksSourceBody {
+  name: string
+  url: string
+  total_gb?: number
+  expires_at?: string | number | null
+}
+
+export interface UpdateSocksEndpointBody {
+  quota_gb?: number
+  expires_at?: string | number | null
+  remark?: string
+}
+
 /** 新增用户入参 */
 export interface CreatePackageBody {
   name: string

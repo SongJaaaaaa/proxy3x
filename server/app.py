@@ -22,7 +22,7 @@ from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
 
 APP_DIR = Path(os.environ.get("PROXY3X_APP_DIR", Path(__file__).resolve().parent))
@@ -36,12 +36,19 @@ INITIAL_CREDENTIALS_PATH = APP_DIR / "manager-credentials.txt"
 CHAIN_DB = CHAIN_DIR / "db" / "x-ui.db"
 DEPLOYMENT_PATH = CHAIN_DIR / "chain-deployment.json"
 SUBSCRIPTIONS_DIR = CHAIN_DIR / "subscriptions"
+SOCKS_FACTORY_DIR = CHAIN_DIR / "socks-factory"
+SING_BOX_CONFIG_PATH = SOCKS_FACTORY_DIR / "sing-box.json"
 PANEL_BASE_URL = os.environ.get("PROXY3X_PANEL_URL", "http://127.0.0.1:32080")
 XUI_CONTAINER = os.environ.get("PROXY3X_XUI_CONTAINER", "3x-ui-chain")
 DEFAULT_SERVER = os.environ.get("PROXY3X_SERVER", "vpn.sjiaa.cc.cd")
 ALT_SUBSCRIPTION_DOMAIN = os.environ.get("PROXY3X_ALT_SUBSCRIPTION_DOMAIN", "vpn-us.songjiaaa.ccwu.cc")
 SHADOWROCKET_NODE_SERVER = os.environ.get("PROXY3X_SHADOWROCKET_NODE_SERVER", "154.44.9.60")
 REALITY_SNI = os.environ.get("PROXY3X_REALITY_SNI", "www.amazon.com")
+SOCKS_PORT_START = int(os.environ.get("PROXY3X_SOCKS_PORT_START", "33001"))
+SOCKS_PORT_END = int(os.environ.get("PROXY3X_SOCKS_PORT_END", "33999"))
+SING_BOX_API_LISTEN = os.environ.get("PROXY3X_SING_BOX_API_LISTEN", "127.0.0.1:33000")
+SING_BOX_SERVICE = os.environ.get("PROXY3X_SING_BOX_SERVICE", "proxy3x-socks-factory")
+STATSQUERY_BIN = os.environ.get("PROXY3X_STATSQUERY_BIN", "xray")
 OUTBOUND_TEST_URL = "https://www.google.com/generate_204"
 GB = 1024 * 1024 * 1024
 SESSION_MAX_AGE = 86400
@@ -52,6 +59,12 @@ DEFAULT_NODE_NAME = "🇺🇸 住宅家宽"
 LEGACY_NODE_NAMES = {"高速节点", "高速流量"}
 LEGACY_SINGLE_NODE_NAMES = LEGACY_NODE_NAMES | {"🇺🇸 娱乐流量"}
 BLOCK_OUTBOUND_TAG = "proxy3x-block"
+PACKAGE_TYPE_CHAIN = "chain"
+PACKAGE_TYPE_MIXED = "mixed"
+DIRECT_OUTBOUND_TAG = "direct"
+ENTERTAINMENT_NODE_NAME = "🇺🇸 娱乐流量"
+RESIDENTIAL_NODE_NAME = "🇺🇸 住宅流量"
+SUPPORTED_SOURCE_PROTOCOLS = {"vless", "vmess", "trojan", "ss", "shadowsocks", "socks", "socks5", "http"}
 
 
 def now():
@@ -165,6 +178,7 @@ def connect_manager_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=5000")
     con.execute("PRAGMA journal_mode=WAL")
     return con
 
@@ -218,6 +232,55 @@ def init_db():
               message TEXT NOT NULL,
               created_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS socks_sources (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              url TEXT NOT NULL,
+              total_gb REAL NOT NULL DEFAULT 0,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              node_count INTEGER NOT NULL DEFAULT 0,
+              endpoint_count INTEGER NOT NULL DEFAULT 0,
+              last_refresh_at INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS socks_nodes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              source_id INTEGER NOT NULL,
+              node_key TEXT NOT NULL,
+              name TEXT NOT NULL,
+              protocol TEXT NOT NULL,
+              server TEXT NOT NULL DEFAULT '',
+              port INTEGER NOT NULL DEFAULT 0,
+              raw_uri TEXT NOT NULL DEFAULT '',
+              config_json TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT '未检测',
+              latency_ms INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(source_id, node_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS socks_endpoints (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              source_id INTEGER NOT NULL,
+              node_id INTEGER NOT NULL,
+              listen_port INTEGER NOT NULL UNIQUE,
+              username TEXT NOT NULL,
+              password TEXT NOT NULL,
+              quota_gb REAL NOT NULL DEFAULT 0,
+              upload_bytes INTEGER NOT NULL DEFAULT 0,
+              download_bytes INTEGER NOT NULL DEFAULT 0,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              expires_at INTEGER NOT NULL DEFAULT 0,
+              remark TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in con.execute("PRAGMA table_info(packages)").fetchall()}
@@ -225,6 +288,12 @@ def init_db():
             con.execute("ALTER TABLE packages ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0")
         if "disabled_reason" not in columns:
             con.execute("ALTER TABLE packages ADD COLUMN disabled_reason TEXT NOT NULL DEFAULT ''")
+        if "package_type" not in columns:
+            con.execute(f"ALTER TABLE packages ADD COLUMN package_type TEXT NOT NULL DEFAULT '{PACKAGE_TYPE_CHAIN}'")
+        if "direct_node_enabled" not in columns:
+            con.execute("ALTER TABLE packages ADD COLUMN direct_node_enabled INTEGER NOT NULL DEFAULT 1")
+        if "residential_node_enabled" not in columns:
+            con.execute("ALTER TABLE packages ADD COLUMN residential_node_enabled INTEGER NOT NULL DEFAULT 0")
         con.execute(
             """
             UPDATE packages
@@ -232,6 +301,18 @@ def init_db():
             WHERE expires_at IS NULL OR expires_at = 0
             """,
             (DEFAULT_PACKAGE_EXPIRE_SECONDS,),
+        )
+        con.execute(
+            """
+            UPDATE packages
+            SET direct_node_enabled = CASE WHEN direct_port IS NOT NULL AND direct_port > 0 THEN 1 ELSE 0 END
+            """,
+        )
+        con.execute(
+            """
+            UPDATE packages
+            SET residential_node_enabled = CASE WHEN residential_port IS NOT NULL AND residential_port > 0 THEN 1 ELSE 0 END
+            """,
         )
         # SOCKS5 额度字段：用于上游用量进度条的分母（GB）。0 = 未设额度，前端不画进度条。
         upstream_columns = {row["name"] for row in con.execute("PRAGMA table_info(upstreams)").fetchall()}
@@ -342,6 +423,19 @@ def read_panel_credentials():
     if not values.get("username") or not values.get("password"):
         raise RuntimeError("没有找到 3x-ui 面板凭据")
     return values["username"], values["password"]
+
+
+def has_panel_credentials():
+    username, password = "", ""
+    for line in read_text(CHAIN_DIR / "panel-credentials.txt").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == "username":
+            username = value.strip()
+        elif key.strip() == "password":
+            password = value.strip()
+    return bool(username and password)
 
 
 class PanelClient:
@@ -564,6 +658,29 @@ def make_inbound(spec):
     }
 
 
+def local_mock_inbound(spec):
+    total_bytes = int(spec.get("total_bytes") or 0)
+    return {
+        "sub_id": spec["sub_id"],
+        "email": spec["email"],
+        "remark": spec["remark"],
+        "node_name": spec["node_name"],
+        "port": int(spec["port"]),
+        "uuid": str(uuid.uuid4()),
+        "public_key": "local-dev-public-key",
+        "short_id": secrets.token_hex(4),
+        "sni": REALITY_SNI,
+        "total_gb": round(total_bytes / GB, 3) if total_bytes else 0,
+        "local_dev": True,
+    }
+
+
+def make_inbound_best_effort(spec):
+    if os.name == "nt" and not has_panel_credentials():
+        return local_mock_inbound(spec)
+    return make_inbound(spec)
+
+
 def vless_uri(entry, node_name):
     params = {
         "encryption": "none",
@@ -599,7 +716,13 @@ def clash_node(entry, node_name):
 
 def package_nodes(package):
     entries = []
-    for key in ("direct_entry_json", "residential_entry_json"):
+    node_specs = [
+        ("direct_entry_json", bool(package.get("direct_node_enabled", 1))),
+        ("residential_entry_json", bool(package.get("residential_node_enabled", 0))),
+    ]
+    for key, enabled in node_specs:
+        if not enabled:
+            continue
         entry = json.loads(package[key] or "{}")
         if entry:
             entries.append((entry.get("node_name") or DEFAULT_NODE_NAME, entry))
@@ -816,6 +939,807 @@ def import_existing_packages():
     return imported
 
 
+def b64_decode_text(text):
+    text = (text or "").strip()
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return ""
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+        return raw.decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def parse_subscription_userinfo(value):
+    info = {}
+    for part in str(value or "").split(";"):
+        if "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        key = key.strip().lower()
+        try:
+            info[key] = int(float(val.strip()))
+        except (TypeError, ValueError):
+            continue
+    return info
+
+
+def fetch_subscription(url):
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "proxy3x-manager/1.0",
+            "Accept": "text/plain,text/yaml,application/yaml,*/*",
+        },
+    )
+    opener = build_opener(ProxyHandler({}))
+    with opener.open(req, timeout=35) as resp:
+        text = resp.read().decode("utf-8", "replace")
+        userinfo = parse_subscription_userinfo(resp.headers.get("Subscription-Userinfo"))
+        total = int(userinfo.get("total") or 0)
+        return {"text": text, "total_gb": gb_from_bytes(total) if total > 0 else 0}
+
+
+def fetch_subscription_text(url):
+    return fetch_subscription(url)["text"]
+
+
+def clean_node_name(name, fallback="未命名节点"):
+    name = unquote(str(name or "").strip())
+    name = re.sub(r"\s+", " ", name)
+    return name[:80] if name else fallback
+
+
+def source_node_key(raw):
+    return hashlib.sha1((raw or "").encode("utf-8", "ignore")).hexdigest()
+
+
+def split_csv_like(text):
+    items = []
+    buf = ""
+    quote_ch = ""
+    for ch in text:
+        if quote_ch:
+            buf += ch
+            if ch == quote_ch:
+                quote_ch = ""
+            continue
+        if ch in ("'", '"'):
+            quote_ch = ch
+            buf += ch
+            continue
+        if ch == ",":
+            items.append(buf.strip())
+            buf = ""
+            continue
+        buf += ch
+    if buf.strip():
+        items.append(buf.strip())
+    return items
+
+
+def yaml_value(text):
+    text = str(text or "").strip()
+    if len(text) >= 2 and text[0] in ("'", '"') and text[-1] == text[0]:
+        return text[1:-1]
+    if text.lower() == "true":
+        return True
+    if text.lower() == "false":
+        return False
+    try:
+        if "." in text:
+            return float(text)
+        return int(text)
+    except ValueError:
+        return text
+
+
+def parse_inline_proxy(text):
+    text = text.strip().strip("{}").strip()
+    data = {}
+    for item in split_csv_like(text):
+        if ":" not in item:
+            continue
+        key, value = item.split(":", 1)
+        data[key.strip()] = yaml_value(value)
+    return data
+
+
+def parse_clash_proxies(text):
+    proxies = []
+    in_proxies = False
+    current = None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if re.match(r"^\S[^:]*:\s*$", raw):
+            key = raw.split(":", 1)[0].strip()
+            in_proxies = key == "proxies"
+            if not in_proxies and current:
+                proxies.append(current)
+                current = None
+            continue
+        if not in_proxies:
+            continue
+        line = raw.strip()
+        if line.startswith("- "):
+            if current:
+                proxies.append(current)
+            body = line[2:].strip()
+            current = parse_inline_proxy(body) if body.startswith("{") else {}
+            if ":" in body and not body.startswith("{"):
+                key, value = body.split(":", 1)
+                current[key.strip()] = yaml_value(value)
+            continue
+        if current is not None and ":" in line:
+            key, value = line.split(":", 1)
+            current[key.strip()] = yaml_value(value)
+    if current:
+        proxies.append(current)
+    return proxies
+
+
+def tls_from_query(params, enabled=False):
+    tls = {}
+    security = (params.get("security") or params.get("tls") or [""])[0]
+    if enabled or security in ("tls", "reality"):
+        tls["enabled"] = True
+    sni = (params.get("sni") or params.get("servername") or params.get("peer") or [""])[0]
+    if sni:
+        tls["server_name"] = sni
+    fp = (params.get("fp") or [""])[0]
+    if fp:
+        tls["utls"] = {"enabled": True, "fingerprint": fp}
+    if security == "reality":
+        reality = {"enabled": True}
+        pbk = (params.get("pbk") or params.get("public-key") or [""])[0]
+        sid = (params.get("sid") or params.get("short-id") or [""])[0]
+        if pbk:
+            reality["public_key"] = pbk
+        if sid:
+            reality["short_id"] = sid
+        tls["reality"] = reality
+    return tls
+
+
+def uri_transport(params):
+    network = (params.get("type") or params.get("network") or [""])[0]
+    if network == "ws":
+        headers = {}
+        host = (params.get("host") or [""])[0]
+        if host:
+            headers["Host"] = host
+        return {"type": "ws", "path": (params.get("path") or ["/"])[0] or "/", "headers": headers}
+    if network == "grpc":
+        service = (params.get("serviceName") or params.get("service_name") or [""])[0]
+        data = {"type": "grpc"}
+        if service:
+            data["service_name"] = service
+        return data
+    return None
+
+
+def vmess_transport(cfg):
+    net = str(cfg.get("net") or cfg.get("network") or "").lower()
+    if net == "ws":
+        headers = {}
+        host = cfg.get("host") or ""
+        if host:
+            headers["Host"] = host
+        return {"type": "ws", "path": cfg.get("path") or "/", "headers": headers}
+    if net == "grpc":
+        service = cfg.get("path") or cfg.get("serviceName") or ""
+        data = {"type": "grpc"}
+        if service:
+            data["service_name"] = service
+        return data
+    return None
+
+
+def clash_transport(item):
+    net = str(item.get("network") or item.get("net") or "").lower()
+    if net == "ws":
+        headers = {}
+        host = item.get("host") or item.get("Host") or item.get("ws-host")
+        if host:
+            headers["Host"] = host
+        return {"type": "ws", "path": item.get("path") or item.get("ws-path") or "/", "headers": headers}
+    if net == "grpc":
+        service = item.get("grpc-service-name") or item.get("serviceName") or item.get("service_name")
+        data = {"type": "grpc"}
+        if service:
+            data["service_name"] = service
+        return data
+    return None
+
+
+def parse_uri_node(line):
+    line = (line or "").strip()
+    if not line or "://" not in line:
+        return None
+    scheme = line.split("://", 1)[0].lower()
+    if scheme == "vmess":
+        decoded = b64_decode_text(line.split("://", 1)[1])
+        cfg = json.loads(decoded or "{}")
+        name = clean_node_name(cfg.get("ps") or cfg.get("name"))
+        server = cfg.get("add") or cfg.get("server") or ""
+        port = int(cfg.get("port") or 0)
+        config = {
+            "type": "vmess",
+            "server": server,
+            "server_port": port,
+            "uuid": cfg.get("id") or cfg.get("uuid") or "",
+            "security": cfg.get("scy") or cfg.get("security") or "auto",
+            "alter_id": int(cfg.get("aid") or 0),
+        }
+        if str(cfg.get("tls") or "").lower() == "tls":
+            config["tls"] = {"enabled": True, "server_name": cfg.get("sni") or cfg.get("host") or server}
+        transport = vmess_transport(cfg)
+        if transport:
+            config["transport"] = transport
+        return {"name": name, "protocol": "vmess", "server": server, "port": port, "raw_uri": line, "config": config}
+
+    parsed = urlparse(line)
+    params = parse_qs(parsed.query)
+    name = clean_node_name(parsed.fragment)
+    server = parsed.hostname or ""
+    port = int(parsed.port or 0)
+    config = {"type": scheme, "server": server, "server_port": port}
+    if scheme == "vless":
+        config["uuid"] = unquote(parsed.username or "")
+        flow = (params.get("flow") or [""])[0]
+        if flow:
+            config["flow"] = flow
+        tls = tls_from_query(params)
+        if tls:
+            config["tls"] = tls
+        transport = uri_transport(params)
+        if transport:
+            config["transport"] = transport
+    elif scheme == "trojan":
+        config["password"] = unquote(parsed.username or "")
+        tls = tls_from_query(params, True)
+        if tls:
+            config["tls"] = tls
+        transport = uri_transport(params)
+        if transport:
+            config["transport"] = transport
+    elif scheme in ("socks", "socks5"):
+        config["type"] = "socks"
+        config["version"] = "5"
+        if parsed.username:
+            config["username"] = unquote(parsed.username)
+        if parsed.password:
+            config["password"] = unquote(parsed.password)
+    elif scheme == "http":
+        if parsed.username:
+            config["username"] = unquote(parsed.username)
+        if parsed.password:
+            config["password"] = unquote(parsed.password)
+    elif scheme == "ss":
+        user = unquote(parsed.username or "")
+        if not parsed.hostname:
+            body = line.split("://", 1)[1].split("#", 1)[0]
+            decoded = b64_decode_text(body)
+            if decoded:
+                return parse_uri_node(f"ss://{decoded}#{quote(name)}")
+        if parsed.password:
+            method, pwd = user, unquote(parsed.password)
+        elif ":" in user:
+            method, pwd = user.split(":", 1)
+        else:
+            decoded = b64_decode_text(user)
+            method, pwd = decoded.split(":", 1) if ":" in decoded else ("", "")
+        config["type"] = "shadowsocks"
+        config["method"] = method
+        config["password"] = pwd
+    else:
+        return None
+    if not server or not port:
+        return None
+    return {"name": name or server, "protocol": config["type"], "server": server, "port": port, "raw_uri": line, "config": config}
+
+
+def clash_proxy_to_node(item):
+    proto = str(item.get("type") or "").lower()
+    if proto not in SUPPORTED_SOURCE_PROTOCOLS:
+        return None
+    if proto == "shadowsocks":
+        proto = "ss"
+    server = str(item.get("server") or "")
+    port = int(item.get("port") or item.get("server_port") or 0)
+    if not server or not port:
+        return None
+    name = clean_node_name(item.get("name") or server)
+    config = {"type": "shadowsocks" if proto == "ss" else ("socks" if proto == "socks5" else proto), "server": server, "server_port": port}
+    for key in ("uuid", "password", "method", "flow", "alter_id", "security"):
+        if item.get(key) not in (None, ""):
+            config[key] = item.get(key)
+    if proto in ("ss", "shadowsocks") and item.get("cipher") and not config.get("method"):
+        config["method"] = item.get("cipher")
+    if proto == "vless" and item.get("id") and not config.get("uuid"):
+        config["uuid"] = item.get("id")
+    if proto == "vmess":
+        config.setdefault("security", "auto")
+        config["alter_id"] = int(config.get("alter_id") or item.get("alterId") or 0)
+    if proto in ("vless", "trojan", "vmess"):
+        tls_enabled = bool(item.get("tls")) or str(item.get("network") or "") == "ws"
+        if tls_enabled:
+            tls = {"enabled": True}
+            sni = item.get("servername") or item.get("sni") or item.get("server_name")
+            if sni:
+                tls["server_name"] = sni
+            fp = item.get("client-fingerprint") or item.get("fingerprint")
+            if fp:
+                tls["utls"] = {"enabled": True, "fingerprint": fp}
+            reality = item.get("reality-opts") or item.get("reality_opts")
+            if isinstance(reality, dict):
+                tls["reality"] = {
+                    "enabled": True,
+                    "public_key": reality.get("public-key") or reality.get("public_key") or "",
+                    "short_id": reality.get("short-id") or reality.get("short_id") or "",
+                }
+            elif item.get("pbk") or item.get("public-key"):
+                tls["reality"] = {
+                    "enabled": True,
+                    "public_key": item.get("pbk") or item.get("public-key") or "",
+                    "short_id": item.get("sid") or item.get("short-id") or "",
+                }
+            config["tls"] = tls
+        transport = clash_transport(item)
+        if transport:
+            config["transport"] = transport
+    raw = json_dumps(item)
+    return {"name": name, "protocol": config["type"], "server": server, "port": port, "raw_uri": raw, "config": config}
+
+
+def parse_subscription_nodes(text):
+    text = (text or "").strip()
+    if not text:
+        return []
+    body = text
+    if "://" not in body and "proxies:" not in body:
+        decoded = b64_decode_text(body)
+        if decoded:
+            body = decoded
+    nodes = []
+    if "proxies:" in body:
+        for item in parse_clash_proxies(body):
+            node = clash_proxy_to_node(item)
+            if node:
+                nodes.append(node)
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or "://" not in line:
+            continue
+        node = parse_uri_node(line)
+        if node:
+            nodes.append(node)
+    seen = set()
+    result = []
+    for node in nodes:
+        key = source_node_key(node.get("raw_uri") or json_dumps(node.get("config")))
+        if key in seen:
+            continue
+        seen.add(key)
+        node["node_key"] = key
+        result.append(node)
+    return result
+
+
+def next_socks_port(con):
+    used = {int(row["listen_port"]) for row in con.execute("SELECT listen_port FROM socks_endpoints").fetchall()}
+    for port in range(SOCKS_PORT_START, SOCKS_PORT_END + 1):
+        if port in used:
+            continue
+        return port
+    raise RuntimeError(f"{SOCKS_PORT_START}-{SOCKS_PORT_END} 没有可用 SOCKS5 端口")
+
+
+def socks_endpoint_uri(row, host=None):
+    host = host or server_host()
+    user = quote(row["username"] or "", safe="")
+    pwd = quote(row["password"] or "", safe="")
+    return f"socks5://{user}:{pwd}@{host}:{int(row['listen_port'])}"
+
+
+def refresh_socks_source(source_id):
+    init_db()
+    current = now()
+    with connect_manager_db() as con:
+        src = con.execute("SELECT * FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+        if not src:
+            raise ValueError("订阅源不存在")
+        try:
+            sub = fetch_subscription(src["url"])
+            if not sub["text"].strip():
+                raise RuntimeError("订阅接口返回空内容，请检查 token、套餐状态或源站订阅服务")
+            nodes = parse_subscription_nodes(sub["text"])
+            if not nodes:
+                raise RuntimeError("订阅内容里没有可识别节点")
+            for node in nodes:
+                con.execute(
+                    """
+                    INSERT INTO socks_nodes(
+                      source_id, node_key, name, protocol, server, port, raw_uri,
+                      config_json, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '未检测', ?, ?)
+                    ON CONFLICT(source_id, node_key) DO UPDATE SET
+                      name = excluded.name,
+                      protocol = excluded.protocol,
+                      server = excluded.server,
+                      port = excluded.port,
+                      raw_uri = excluded.raw_uri,
+                      config_json = excluded.config_json,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        source_id,
+                        node["node_key"],
+                        node["name"],
+                        node["protocol"],
+                        node["server"],
+                        int(node["port"] or 0),
+                        node["raw_uri"],
+                        json_dumps(node["config"]),
+                        current,
+                        current,
+                    ),
+                )
+            con.execute(
+                """
+                UPDATE socks_sources
+                SET node_count = ?, total_gb = ?, last_refresh_at = ?, last_error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (len(nodes), sub["total_gb"], current, current, source_id),
+            )
+            return len(nodes)
+        except Exception as exc:
+            con.execute(
+                "UPDATE socks_sources SET last_error = ?, updated_at = ? WHERE id = ?",
+                (str(exc), current, source_id),
+            )
+            con.commit()
+            raise
+
+
+def generate_socks_endpoints(source_id, expires_at=None):
+    init_db()
+    current = now()
+    endpoint_expires_at = parse_upstream_expires_at(expires_at, current)
+    with connect_manager_db() as con:
+        src = con.execute("SELECT * FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+        if not src:
+            raise ValueError("订阅源不存在")
+        nodes = con.execute("SELECT * FROM socks_nodes WHERE source_id = ? ORDER BY id", (source_id,)).fetchall()
+        if not nodes:
+            raise ValueError("请先刷新订阅，解析出节点后再生成 SOCKS5")
+        quota = round(float(src["total_gb"] or 0) / len(nodes), 3) if float(src["total_gb"] or 0) > 0 else 0
+        made = 0
+        for node in nodes:
+            exists = con.execute("SELECT id FROM socks_endpoints WHERE node_id = ?", (node["id"],)).fetchone()
+            if exists:
+                continue
+            port = next_socks_port(con)
+            con.execute(
+                """
+                INSERT INTO socks_endpoints(
+                  source_id, node_id, listen_port, username, password, quota_gb,
+                  expires_at, remark, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_id,
+                    node["id"],
+                    port,
+                    f"px{source_id}_{node['id']}",
+                    secrets.token_urlsafe(10),
+                    quota,
+                    endpoint_expires_at,
+                    node["name"],
+                    current,
+                    current,
+                ),
+            )
+            made += 1
+        count = con.execute("SELECT COUNT(*) AS c FROM socks_endpoints WHERE source_id = ?", (source_id,)).fetchone()["c"]
+        con.execute("UPDATE socks_sources SET endpoint_count = ?, updated_at = ? WHERE id = ?", (count, current, source_id))
+    refresh_sing_box("生成 SOCKS5")
+    log_event("信息", f"订阅源 {src['name']} 已生成 SOCKS5 {made} 个")
+    return made
+
+
+def endpoint_expired(row, at=None):
+    expires_at = int(row["expires_at"] or 0)
+    return bool(expires_at and expires_at <= int(at or now()))
+
+
+def endpoint_used(row):
+    return int(row["upload_bytes"] or 0) + int(row["download_bytes"] or 0)
+
+
+def endpoint_public(row, host=None, reveal=False):
+    item = dict(row)
+    item["used_bytes"] = endpoint_used(item)
+    item["used_gb"] = gb_from_bytes(item["used_bytes"])
+    item["quota_bytes"] = bytes_from_gb(item["quota_gb"])
+    item["usage_percent"] = round(item["used_bytes"] / item["quota_bytes"] * 100, 1) if item["quota_bytes"] > 0 else None
+    item["expired"] = endpoint_expired(item)
+    item["expires_at_text"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(item["expires_at"] or 0))) if item.get("expires_at") else ""
+    if reveal:
+        item["uri"] = socks_endpoint_uri(item, host)
+    else:
+        item["uri"] = ""
+        item["username"] = mask_secret(item.get("username"))
+        item["password"] = mask_secret(item.get("password"))
+    return item
+
+
+def node_public(row):
+    item = dict(row)
+    item.pop("raw_uri", None)
+    item.pop("config_json", None)
+    return item
+
+
+def socks_factory_data(source_id=None, base_url=None):
+    init_db()
+    host = server_host()
+    with connect_manager_db() as con:
+        if source_id:
+            sources = [con.execute("SELECT * FROM socks_sources WHERE id = ?", (source_id,)).fetchone()]
+            sources = [row for row in sources if row]
+        else:
+            sources = con.execute("SELECT * FROM socks_sources ORDER BY id DESC").fetchall()
+        result = []
+        for src in sources:
+            nodes = [node_public(row) for row in con.execute("SELECT * FROM socks_nodes WHERE source_id = ? ORDER BY id", (src["id"],)).fetchall()]
+            endpoints = [
+                endpoint_public(row, host)
+                for row in con.execute(
+                    """
+                    SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port
+                    FROM socks_endpoints e
+                    JOIN socks_nodes n ON n.id = e.node_id
+                    WHERE e.source_id = ?
+                    ORDER BY e.listen_port
+                    """,
+                    (src["id"],),
+                ).fetchall()
+            ]
+            used = sum(int(e["used_bytes"] or 0) for e in endpoints)
+            quota = sum(int(e["quota_bytes"] or 0) for e in endpoints)
+            item = dict(src)
+            item["used_bytes"] = used
+            item["used_gb"] = gb_from_bytes(used)
+            item["endpoint_quota_bytes"] = quota
+            item["endpoint_quota_gb"] = gb_from_bytes(quota)
+            item["usage_percent"] = round(used / quota * 100, 1) if quota > 0 else None
+            item["detail_url"] = f"{(base_url or '').rstrip('/')}/socks-sources/{src['id']}" if base_url else f"/socks-sources/{src['id']}"
+            item["nodes"] = nodes
+            item["endpoints"] = endpoints
+            result.append(item)
+    return result
+
+
+def sing_box_outbound(row):
+    cfg = json.loads(row["config_json"] or "{}")
+    cfg["tag"] = f"source-node-{int(row['node_id'])}"
+    return cfg
+
+
+def write_sing_box_config():
+    current = now()
+    with connect_manager_db() as con:
+        rows = con.execute(
+            """
+            SELECT e.*, n.config_json, n.name AS node_name
+            FROM socks_endpoints e
+            JOIN socks_nodes n ON n.id = e.node_id
+            JOIN socks_sources s ON s.id = e.source_id
+            WHERE e.enabled = 1 AND s.enabled = 1
+            ORDER BY e.listen_port
+            """
+        ).fetchall()
+    inbounds = []
+    outbounds = [{"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}]
+    rules = []
+    for row in rows:
+        if endpoint_expired(row, current):
+            continue
+        used = endpoint_used(row)
+        quota = bytes_from_gb(row["quota_gb"])
+        if quota and used >= quota:
+            continue
+        in_tag = f"socks-in-{int(row['id'])}"
+        out_tag = f"source-node-{int(row['node_id'])}"
+        inbounds.append(
+            {
+                "type": "socks",
+                "tag": in_tag,
+                "listen": "0.0.0.0",
+                "listen_port": int(row["listen_port"]),
+                "users": [{"username": row["username"], "password": row["password"]}],
+            }
+        )
+        out = sing_box_outbound(row)
+        outbounds.append(out)
+        rules.append({"inbound": [in_tag], "action": "route", "outbound": out_tag})
+    cfg = {
+        "log": {"level": "info"},
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "route": {"rules": rules, "final": "block"},
+        "experimental": {
+            "v2ray_api": {
+                "listen": SING_BOX_API_LISTEN,
+                "stats": {
+                    "enabled": True,
+                    "inbounds": [item["tag"] for item in inbounds],
+                    "outbounds": [item["tag"] for item in outbounds if item["tag"].startswith("source-node-")],
+                    "users": [row["username"] for row in rows],
+                },
+            }
+        },
+    }
+    write_text(SING_BOX_CONFIG_PATH, pretty_json(cfg))
+    return len(inbounds)
+
+
+def reload_sing_box_best_effort(action="刷新 sing-box"):
+    if os.name == "nt" or not SING_BOX_SERVICE:
+        return False
+    result = subprocess.run(
+        ["systemctl", "restart", SING_BOX_SERVICE],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 0:
+        log_event("信息", f"{action}：已重启 {SING_BOX_SERVICE}")
+        return True
+    detail = (result.stderr or result.stdout or "").strip()
+    log_event("警告", f"{action}：sing-box 重启失败：{detail or result.returncode}")
+    return False
+
+
+def refresh_sing_box(action="刷新 sing-box"):
+    if os.name == "nt" and "PROXY3X_CHAIN_DIR" not in os.environ:
+        return 0
+    try:
+        count = write_sing_box_config()
+    except OSError as exc:
+        log_event("警告", f"{action}：写入 sing-box 配置失败：{exc}")
+        return 0
+    reload_sing_box_best_effort(action)
+    return count
+
+
+def set_socks_endpoint_enabled(endpoint_id, enabled):
+    with connect_manager_db() as con:
+        row = con.execute("SELECT id FROM socks_endpoints WHERE id = ?", (endpoint_id,)).fetchone()
+        if not row:
+            raise ValueError("SOCKS5 不存在")
+        con.execute(
+            "UPDATE socks_endpoints SET enabled = ?, updated_at = ? WHERE id = ?",
+            (1 if enabled else 0, now(), endpoint_id),
+        )
+    refresh_sing_box("切换 SOCKS5")
+
+
+def update_socks_endpoint(endpoint_id, payload):
+    try:
+        quota_gb = float(payload.get("quota_gb") or 0)
+    except (TypeError, ValueError):
+        quota_gb = 0
+    expires_at = parse_upstream_expires_at(payload.get("expires_at"))
+    remark = payload.get("remark") or ""
+    with connect_manager_db() as con:
+        row = con.execute("SELECT id FROM socks_endpoints WHERE id = ?", (endpoint_id,)).fetchone()
+        if not row:
+            raise ValueError("SOCKS5 不存在")
+        con.execute(
+            """
+            UPDATE socks_endpoints
+            SET quota_gb = ?, expires_at = ?, remark = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (quota_gb, expires_at, remark, now(), endpoint_id),
+        )
+    refresh_sing_box("保存 SOCKS5")
+
+
+def update_socks_endpoint_usage(endpoint_id, payload):
+    try:
+        upload = int(float(payload.get("upload_bytes") or 0))
+        download = int(float(payload.get("download_bytes") or 0))
+    except (TypeError, ValueError):
+        raise ValueError("用量需要是数字")
+    with connect_manager_db() as con:
+        row = con.execute("SELECT id FROM socks_endpoints WHERE id = ?", (endpoint_id,)).fetchone()
+        if not row:
+            raise ValueError("SOCKS5 不存在")
+        con.execute(
+            """
+            UPDATE socks_endpoints
+            SET upload_bytes = ?, download_bytes = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (max(0, upload), max(0, download), now(), endpoint_id),
+        )
+    refresh_sing_box("更新 SOCKS5 用量")
+
+
+def parse_statsquery_value(text):
+    total = 0
+    for line in (text or "").splitlines():
+        match = re.search(r"value:\s*(\d+)", line)
+        if match:
+            total += int(match.group(1))
+            continue
+        match = re.search(r"\b(\d+)\b", line.strip())
+        if match:
+            total += int(match.group(1))
+    return total
+
+
+def query_sing_box_stat(name):
+    try:
+        result = subprocess.run(
+            [STATSQUERY_BIN, "api", "statsquery", "--server", SING_BOX_API_LISTEN, "-pattern", name],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"找不到统计命令：{STATSQUERY_BIN}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or f"统计命令失败：{result.returncode}")
+    return parse_statsquery_value(result.stdout)
+
+
+def sync_socks_usage(source_id=None):
+    with connect_manager_db() as con:
+        sql = "SELECT * FROM socks_endpoints"
+        args = []
+        if source_id:
+            sql += " WHERE source_id = ?"
+            args.append(source_id)
+        rows = con.execute(sql, args).fetchall()
+        changed = 0
+        for row in rows:
+            tag = f"socks-in-{int(row['id'])}"
+            up = query_sing_box_stat(f"inbound>>>{tag}>>>traffic>>>uplink")
+            down = query_sing_box_stat(f"inbound>>>{tag}>>>traffic>>>downlink")
+            con.execute(
+                """
+                UPDATE socks_endpoints
+                SET upload_bytes = ?, download_bytes = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (up, down, now(), row["id"]),
+            )
+            changed += 1
+    return changed
+
+
+def delete_socks_source(source_id):
+    with connect_manager_db() as con:
+        row = con.execute("SELECT name FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+        if not row:
+            raise ValueError("订阅源不存在")
+        con.execute("DELETE FROM socks_endpoints WHERE source_id = ?", (source_id,))
+        con.execute("DELETE FROM socks_nodes WHERE source_id = ?", (source_id,))
+        con.execute("DELETE FROM socks_sources WHERE id = ?", (source_id,))
+    refresh_sing_box("删除订阅源")
+    log_event("信息", f"已删除订阅源 {row['name']}")
+
+
 def parse_upstream_line(text):
     text = (text or "").strip()
     protocol = "socks"
@@ -922,7 +1846,29 @@ def test_socks_proxy(upstream):
             raise RuntimeError("连接目标失败")
 
 
+def internal_socks_endpoint(upstream):
+    try:
+        port = int(upstream.get("port") or 0)
+    except (TypeError, ValueError):
+        return None
+    with connect_manager_db() as con:
+        row = con.execute(
+            """
+            SELECT e.*, s.enabled AS source_enabled
+            FROM socks_endpoints e
+            JOIN socks_sources s ON s.id = e.source_id
+            WHERE e.listen_port = ? AND e.username = ? AND e.password = ?
+            """,
+            (port, upstream.get("username") or "", upstream.get("password") or ""),
+        ).fetchone()
+    if not row or not row["enabled"] or not row["source_enabled"] or endpoint_expired(row):
+        return None
+    return row
+
+
 def check_upstream(upstream):
+    if internal_socks_endpoint(upstream):
+        return "socks", ""
     try:
         test_socks_proxy(upstream)
         return "socks", ""
@@ -1380,14 +2326,53 @@ def disable_expired_upstreams(con):
     return changed
 
 
+def disable_expired_socks_endpoints(con):
+    changed = 0
+    current = now()
+    rows = con.execute(
+        """
+        SELECT e.*, n.name AS node_name
+        FROM socks_endpoints e
+        LEFT JOIN socks_nodes n ON n.id = e.node_id
+        WHERE e.enabled = 1
+        ORDER BY e.id
+        """
+    ).fetchall()
+    for row in rows:
+        used = endpoint_used(row)
+        quota = bytes_from_gb(row["quota_gb"])
+        reason = ""
+        if endpoint_expired(row, current):
+            reason = "已到期"
+        elif quota and used >= quota:
+            reason = "额度用完"
+        if not reason:
+            continue
+        con.execute(
+            "UPDATE socks_endpoints SET enabled = 0, updated_at = ? WHERE id = ?",
+            (current, row["id"]),
+        )
+        con.execute(
+            "INSERT INTO events(level, message, created_at) VALUES (?, ?, ?)",
+            ("警告", f"订阅 SOCKS5 {row['remark'] or row['node_name']} {reason}，已停用", current),
+        )
+        changed += 1
+    return changed
+
+
 def enforce_quotas():
     init_db()
     changed = 0
+    chain_changed = 0
     traffic = traffic_map()
     with connect_manager_db() as con:
-        changed += disable_expired_upstreams(con)
+        chain_changed += disable_expired_upstreams(con)
+        socks_changed = disable_expired_socks_endpoints(con)
+        changed += chain_changed + socks_changed
         packages = con.execute("SELECT * FROM packages ORDER BY id").fetchall()
-        changed += disable_expired_packages(con, packages)
+        package_changed = disable_expired_packages(con, packages)
+        changed += package_changed
+        chain_changed += package_changed
         for p in packages:
             if package_is_expired(p):
                 continue
@@ -1399,6 +2384,7 @@ def enforce_quotas():
                     con.execute("UPDATE packages SET residential_enabled = 0, updated_at = ? WHERE id = ?", (now(), p["id"]))
                     log_event("警告", f"{p['name']} 住宅流量达到 {p['residential_gb']}GB，已关闭住宅节点")
                     changed += 1
+                    chain_changed += 1
             if total_limit and usage["total_used"] >= total_limit and p["enabled"]:
                 set_inbound_enabled(p["direct_port"], p["direct_email"], False)
                 set_inbound_enabled(p["residential_port"], p["residential_email"], False)
@@ -1408,9 +2394,12 @@ def enforce_quotas():
                 )
                 log_event("警告", f"{p['name']} 总额度达到 {p['total_gb']}GB，已关闭全部节点")
                 changed += 1
-    if changed:
+                chain_changed += 1
+    if chain_changed:
         generate_subscriptions()
         refresh_routes_best_effort("巡检后刷新")
+    if socks_changed:
+            refresh_sing_box("巡检 SOCKS5")
     return changed
 
 
@@ -1428,7 +2417,7 @@ def ensure_residential_node(package_id):
             generate_subscriptions()
             return "住宅节点已存在，已刷新路由和订阅"
         port = next_free_port()
-        entry = make_inbound(
+        entry = make_inbound_best_effort(
             {
                 "sub_id": p["sub_id"],
                 "email": f"{p['sub_id']}-residential",
@@ -1494,7 +2483,7 @@ def create_package(payload):
         if con.execute("SELECT id FROM packages WHERE sub_id = ?", (sub_id,)).fetchone():
             raise ValueError("订阅名已存在，请换一个")
     direct_port = next_free_port()
-    direct_entry = make_inbound(
+    direct_entry = make_inbound_best_effort(
         {
             "sub_id": sub_id,
             "email": f"{sub_id}-node",
@@ -1737,6 +2726,181 @@ class Handler(BaseHTTPRequestHandler):
             generate_subscriptions()
             self.send_json({"ok": True, "message": "订阅已刷新"})
             return
+        if path == "/api/socks-sources":
+            if self.command == "GET":
+                self.send_json({"ok": True, "data": socks_factory_data(base_url=self.public_base_url())})
+                return
+            if self.command == "POST":
+                payload = self.read_json()
+                name = (payload.get("name") or "").strip()
+                url = (payload.get("url") or "").strip()
+                if not name or not url:
+                    self.send_json({"ok": False, "message": "名称和订阅链接不能为空"}, 400)
+                    return
+                try:
+                    total_gb = float(payload.get("total_gb") or 0)
+                except (TypeError, ValueError):
+                    total_gb = 0
+                with connect_manager_db() as con:
+                    cur = con.execute(
+                        """
+                        INSERT INTO socks_sources(name, url, total_gb, enabled, created_at, updated_at)
+                        VALUES (?, ?, ?, 1, ?, ?)
+                        """,
+                        (name, url, total_gb, now(), now()),
+                    )
+                    source_id = cur.lastrowid
+                try:
+                    count = refresh_socks_source(source_id)
+                except Exception as exc:
+                    self.send_json({"ok": False, "message": f"订阅已保存，但刷新失败：{exc}", "data": {"id": source_id}}, 200)
+                    return
+                made = generate_socks_endpoints(source_id, payload.get("expires_at"))
+                self.send_json({"ok": True, "message": f"已添加订阅源，解析节点 {count} 个，生成 SOCKS5 {made} 个", "data": {"id": source_id}})
+                return
+        match = re.match(r"^/api/socks-sources/(\d+)$", path)
+        if match and self.command == "GET":
+            rows = socks_factory_data(int(match.group(1)), self.public_base_url())
+            if not rows:
+                self.send_json({"ok": False, "message": "订阅源不存在"}, 404)
+                return
+            self.send_json({"ok": True, "data": rows[0]})
+            return
+        if match and self.command == "PUT":
+            source_id = int(match.group(1))
+            payload = self.read_json()
+            with connect_manager_db() as con:
+                row = con.execute("SELECT id FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+                if not row:
+                    self.send_json({"ok": False, "message": "订阅源不存在"}, 404)
+                    return
+                old = con.execute("SELECT total_gb FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+                try:
+                    total_gb = float(payload.get("total_gb")) if "total_gb" in payload else float(old["total_gb"] or 0)
+                except (TypeError, ValueError):
+                    total_gb = float(old["total_gb"] or 0)
+                con.execute(
+                    """
+                    UPDATE socks_sources
+                    SET name = ?, url = ?, total_gb = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ((payload.get("name") or "").strip(), (payload.get("url") or "").strip(), total_gb, now(), source_id),
+                )
+            self.send_json({"ok": True, "message": "已保存订阅源"})
+            return
+        if match and self.command == "DELETE":
+            try:
+                delete_socks_source(int(match.group(1)))
+            except ValueError as exc:
+                self.send_json({"ok": False, "message": str(exc)}, 404)
+                return
+            self.send_json({"ok": True, "message": "已删除订阅源"})
+            return
+        match = re.match(r"^/api/socks-sources/(\d+)/(refresh|generate|toggle|copy)$", path)
+        if match and self.command == "POST":
+            source_id = int(match.group(1))
+            action = match.group(2)
+            try:
+                if action == "refresh":
+                    count = refresh_socks_source(source_id)
+                    refresh_sing_box("刷新订阅源")
+                    self.send_json({"ok": True, "message": f"刷新完成，解析节点 {count} 个"})
+                    return
+                if action == "generate":
+                    payload = self.read_json()
+                    count = generate_socks_endpoints(source_id, payload.get("expires_at"))
+                    self.send_json({"ok": True, "message": f"生成完成，新增 {count} 个 SOCKS5"})
+                    return
+                if action == "toggle":
+                    payload = self.read_json()
+                    enabled = bool(payload.get("enabled"))
+                    with connect_manager_db() as con:
+                        row = con.execute("SELECT id FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+                        if not row:
+                            raise ValueError("订阅源不存在")
+                        con.execute("UPDATE socks_sources SET enabled = ?, updated_at = ? WHERE id = ?", (1 if enabled else 0, now(), source_id))
+                    refresh_sing_box("切换订阅源")
+                    self.send_json({"ok": True, "message": "已启用订阅源" if enabled else "已停用订阅源"})
+                    return
+                if action == "copy":
+                    with connect_manager_db() as con:
+                        src = con.execute("SELECT id FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
+                        if not src:
+                            raise ValueError("订阅源不存在")
+                        items = con.execute(
+                            """
+                            SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port
+                            FROM socks_endpoints e
+                            JOIN socks_nodes n ON n.id = e.node_id
+                            WHERE e.source_id = ?
+                            ORDER BY e.listen_port
+                            """,
+                            (source_id,),
+                        ).fetchall()
+                    if not items:
+                        raise ValueError("还没有生成 SOCKS5")
+                    lines = [endpoint_public(e, server_host(), True)["uri"] for e in items]
+                    self.send_json({"ok": True, "data": {"text": "\n".join(lines)}, "message": f"已生成 {len(lines)} 条"})
+                    return
+            except ValueError as exc:
+                self.send_json({"ok": False, "message": str(exc)}, 404)
+                return
+        match = re.match(r"^/api/socks-sources/(\d+)/sync-usage$", path)
+        if match and self.command == "POST":
+            try:
+                changed = sync_socks_usage(int(match.group(1)))
+            except Exception as exc:
+                self.send_json({"ok": False, "message": f"同步统计失败：{exc}"}, 500)
+                return
+            self.send_json({"ok": True, "message": f"已同步 {changed} 个 SOCKS5 用量"})
+            return
+        match = re.match(r"^/api/socks-endpoints/(\d+)/(toggle|reveal)$", path)
+        if match and self.command == "POST":
+            endpoint_id = int(match.group(1))
+            action = match.group(2)
+            try:
+                if action == "toggle":
+                    payload = self.read_json()
+                    set_socks_endpoint_enabled(endpoint_id, bool(payload.get("enabled")))
+                    self.send_json({"ok": True, "message": "已启用 SOCKS5" if payload.get("enabled") else "已停用 SOCKS5"})
+                    return
+                if action == "reveal":
+                    with connect_manager_db() as con:
+                        row = con.execute(
+                            """
+                            SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port
+                            FROM socks_endpoints e
+                            JOIN socks_nodes n ON n.id = e.node_id
+                            WHERE e.id = ?
+                            """,
+                            (endpoint_id,),
+                        ).fetchone()
+                    if not row:
+                        raise ValueError("SOCKS5 不存在")
+                    self.send_json({"ok": True, "data": endpoint_public(row, server_host(), True)})
+                    return
+            except ValueError as exc:
+                self.send_json({"ok": False, "message": str(exc)}, 404)
+                return
+        match = re.match(r"^/api/socks-endpoints/(\d+)$", path)
+        if match and self.command == "PUT":
+            try:
+                update_socks_endpoint(int(match.group(1)), self.read_json())
+            except ValueError as exc:
+                self.send_json({"ok": False, "message": str(exc)}, 404)
+                return
+            self.send_json({"ok": True, "message": "已保存 SOCKS5"})
+            return
+        match = re.match(r"^/api/socks-endpoints/(\d+)/usage$", path)
+        if match and self.command == "POST":
+            try:
+                update_socks_endpoint_usage(int(match.group(1)), self.read_json())
+            except ValueError as exc:
+                self.send_json({"ok": False, "message": str(exc)}, 400)
+                return
+            self.send_json({"ok": True, "message": "已更新用量"})
+            return
         if path == "/api/upstreams":
             if self.command == "GET":
                 with connect_manager_db() as con:
@@ -1895,8 +3059,11 @@ class Handler(BaseHTTPRequestHandler):
             with connect_manager_db() as con:
                 con.execute("DELETE FROM upstreams WHERE id = ?", (upstream_id,))
                 con.execute("UPDATE packages SET upstream_id = NULL WHERE upstream_id = ?", (upstream_id,))
-            generate_subscriptions()
-            apply_xray_routes()
+            try:
+                generate_subscriptions()
+            except OSError as exc:
+                log_event("警告", f"删除 SOCKS5 后刷新订阅失败：{exc}")
+            refresh_routes_best_effort("删除 SOCKS5 后刷新")
             self.send_json({"ok": True, "message": "已删除 SOCKS5"})
             return
 

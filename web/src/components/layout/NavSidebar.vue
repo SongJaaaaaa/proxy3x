@@ -17,6 +17,7 @@ const items = [
   { to: '/dashboard', label: '总览', icon: 'dashboard' },
   { to: '/packages', label: '用户套餐', icon: 'inventory_2' },
   { to: '/upstreams', label: 'SOCKS5', icon: 'lan' },
+  { to: '/socks-sources', label: '订阅 SOCKS', icon: 'hub' },
 ]
 
 async function logout() {
@@ -52,12 +53,12 @@ async function logout() {
         :to="it.to"
         class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors active:scale-95"
         :class="
-          route.path === it.to
+          (it.to === '/socks-sources' ? route.path.startsWith('/socks-sources') : route.path === it.to)
             ? 'bg-primary-container/20 text-secondary-fixed-dim border-l-4 border-secondary-fixed font-semibold'
             : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-variant/30'
         "
       >
-        <Icon :name="it.icon" :fill="route.path === it.to" />
+        <Icon :name="it.icon" :fill="it.to === '/socks-sources' ? route.path.startsWith('/socks-sources') : route.path === it.to" />
         <span class="font-body-md text-body-md">{{ it.label }}</span>
       </RouterLink>
     </div>

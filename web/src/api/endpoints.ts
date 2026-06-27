@@ -1,8 +1,12 @@
 import { http } from './client'
 import type {
   CreatePackageBody,
+  CreateSocksSourceBody,
   CreateUpstreamBody,
   DashboardData,
+  SocksEndpoint,
+  SocksSource,
+  UpdateSocksEndpointBody,
   UpdatePackageBody,
   UpdateUpstreamBody,
   UpstreamReveal,
@@ -37,4 +41,19 @@ export const api = {
   updateUpstream: (id: number, body: UpdateUpstreamBody) => http.put(`/upstreams/${id}`, body),
   checkUpstream: (id: number) => http.post(`/upstreams/${id}/check`),
   deleteUpstream: (id: number) => http.del(`/upstreams/${id}`),
+
+  // —— 订阅 SOCKS 工厂 ——
+  socksSources: () => http.get<SocksSource[]>('/socks-sources'),
+  socksSource: (id: number) => http.get<SocksSource>(`/socks-sources/${id}`),
+  createSocksSource: (body: CreateSocksSourceBody) => http.post<{ id: number }>('/socks-sources', body),
+  updateSocksSource: (id: number, body: CreateSocksSourceBody) => http.put(`/socks-sources/${id}`, body),
+  deleteSocksSource: (id: number) => http.del(`/socks-sources/${id}`),
+  refreshSocksSource: (id: number) => http.post(`/socks-sources/${id}/refresh`),
+  generateSocksSource: (id: number, body: { expires_at?: string | number | null } = {}) => http.post(`/socks-sources/${id}/generate`, body),
+  toggleSocksSource: (id: number, enabled: boolean) => http.post(`/socks-sources/${id}/toggle`, { enabled }),
+  copySocksSource: (id: number) => http.post<{ text: string }>(`/socks-sources/${id}/copy`),
+  syncSocksUsage: (id: number) => http.post(`/socks-sources/${id}/sync-usage`),
+  revealSocksEndpoint: (id: number) => http.post<SocksEndpoint>(`/socks-endpoints/${id}/reveal`),
+  toggleSocksEndpoint: (id: number, enabled: boolean) => http.post(`/socks-endpoints/${id}/toggle`, { enabled }),
+  updateSocksEndpoint: (id: number, body: UpdateSocksEndpointBody) => http.put(`/socks-endpoints/${id}`, body),
 }

@@ -15,6 +15,8 @@ const router = createRouter({
     { path: '/dashboard', name: 'dashboard', component: () => import('@/views/DashboardView.vue') },
     { path: '/packages', name: 'packages', component: () => import('@/views/PackagesView.vue') },
     { path: '/upstreams', name: 'upstreams', component: () => import('@/views/UpstreamsView.vue') },
+    { path: '/socks-sources', name: 'socks-sources', component: () => import('@/views/SocksSourcesView.vue') },
+    { path: '/socks-sources/:id', name: 'socks-source-detail', component: () => import('@/views/SocksSourceDetailView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],
 })

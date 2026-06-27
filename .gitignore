@@ -8,11 +8,15 @@ server/frontend/assets/
 # Runtime data & secrets — NEVER commit
 **/data/manager.db
 **/*.db
+**/*.db-journal
+**/*.db-shm
+**/*.db-wal
 **/manager-credentials.json
 **/manager-credentials.txt
 
 # OS / editor
 .DS_Store
+.tmp/
 *.log
 __pycache__/
 *.pyc
