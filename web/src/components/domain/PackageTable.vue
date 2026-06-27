@@ -11,24 +11,27 @@ import ProgressBar from '@/components/ui/ProgressBar.vue'
  *     入口端口 / 绑定 SOCKS5 / 备注 / 操作（含小飞机/Clash 下载）。
  * 首列(用户)与末列(操作)横向滚动时固定（sticky + 不透明背景）。
  * 纵向滚动在表格容器内部（max-h + overflow），不触发整页滚动。
- * 绑定家宽下拉直接改 → emit bind；编辑/删除 emit。
+ * 绑定 SOCKS5 在编辑弹窗中多选；表格只做展示。
  */
 const props = defineProps<{ packages: Package[]; upstreams: Upstream[] }>()
 const emit = defineEmits<{
   edit: [pkg: Package]
   remove: [pkg: Package]
-  bind: [pkg: Package, upstreamId: number | null]
 }>()
 
 function upstreamName(id: number | null) {
   if (!id) return '默认 SOCKS5'
   const u = props.upstreams.find((x) => x.id === id)
   if (!u) return '默认 SOCKS5'
-  return `${u.remark || u.host}${u.expired ? '（已到期）' : ''}`
+  return `${u.display_name || u.remark || u.host}${u.expired ? '（已到期）' : ''}`
 }
-function onBind(pkg: Package, e: Event) {
-  const v = (e.target as HTMLSelectElement).value
-  emit('bind', pkg, v ? Number(v) : null)
+function bindingNames(pkg: Package) {
+  if (pkg.bindings?.length) return pkg.bindings.map((item) => item.display_name || upstreamName(item.upstream_id))
+  return pkg.upstream_id ? [upstreamName(pkg.upstream_id)] : []
+}
+function bindingPorts(pkg: Package) {
+  if (pkg.bindings?.length) return pkg.bindings.map((item) => item.port).filter((port): port is number => Boolean(port))
+  return [pkg.direct_port, pkg.residential_port].filter((port): port is number => Boolean(port))
 }
 async function copy(url: string, label: string) {
   try {
@@ -101,26 +104,25 @@ async function copy(url: string, label: string) {
             <td class="px-3 py-3">
               <div class="flex flex-col items-start gap-1">
                 <span
-                  v-if="p.direct_port"
+                  v-for="port in bindingPorts(p).slice(0, 3)"
+                  :key="port"
                   class="px-2 py-0.5 rounded-md border border-primary/30 bg-primary/10 text-primary font-code-xs text-[11px] leading-tight whitespace-nowrap"
-                >入口 {{ p.direct_port }}</span>
-                <span
-                  v-if="p.residential_port"
-                  class="px-2 py-0.5 rounded-md border border-tertiary-container/30 bg-tertiary-container/10 text-tertiary-container font-code-xs text-[11px] leading-tight whitespace-nowrap"
-                >宅 {{ p.residential_port }}</span>
-                <span v-if="!p.direct_port && !p.residential_port" class="text-outline text-sm">—</span>
+                >入口 {{ port }}</span>
+                <span v-if="bindingPorts(p).length > 3" class="text-outline text-xs">+{{ bindingPorts(p).length - 3 }}</span>
+                <span v-if="!bindingPorts(p).length" class="text-outline text-sm">—</span>
               </div>
             </td>
             <!-- 绑定 SOCKS5 -->
             <td class="px-3 py-3">
-              <select
-                class="control !h-9 !px-2 w-full min-w-[200px] text-sm"
-                :value="p.upstream_id ?? ''"
-                @change="onBind(p, $event)"
-              >
-                <option value="">默认 SOCKS5</option>
-                <option v-for="u in upstreams" :key="u.id" :value="u.id">{{ upstreamName(u.id) }}</option>
-              </select>
+              <div class="flex flex-col gap-1 max-w-[220px]">
+                <span v-if="bindingNames(p).length" class="text-sm text-on-surface truncate">
+                  {{ bindingNames(p).slice(0, 2).join(' / ') }}
+                </span>
+                <span v-if="bindingNames(p).length > 2" class="text-xs text-outline">
+                  另有 {{ bindingNames(p).length - 2 }} 个节点
+                </span>
+                <span v-if="!bindingNames(p).length" class="text-outline text-sm">未绑定</span>
+              </div>
             </td>
             <!-- 到期时间 -->
             <td class="px-3 py-3 whitespace-nowrap">

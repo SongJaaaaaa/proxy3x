@@ -26,8 +26,9 @@ from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_ope
 
 
 APP_DIR = Path(os.environ.get("PROXY3X_APP_DIR", Path(__file__).resolve().parent))
-CHAIN_DIR = Path(os.environ.get("PROXY3X_CHAIN_DIR", "/opt/3x-ui-chain"))
 DATA_DIR = APP_DIR / "data"
+DEFAULT_CHAIN_DIR = DATA_DIR / "chain" if os.name == "nt" else Path("/opt/3x-ui-chain")
+CHAIN_DIR = Path(os.environ.get("PROXY3X_CHAIN_DIR", str(DEFAULT_CHAIN_DIR)))
 DB_PATH = DATA_DIR / "manager.db"
 FRONTEND_DIR = APP_DIR / "frontend"
 RULES_PATH = APP_DIR / "rules.yaml"
@@ -42,7 +43,7 @@ PANEL_BASE_URL = os.environ.get("PROXY3X_PANEL_URL", "http://127.0.0.1:32080")
 XUI_CONTAINER = os.environ.get("PROXY3X_XUI_CONTAINER", "3x-ui-chain")
 DEFAULT_SERVER = os.environ.get("PROXY3X_SERVER", "vpn.sjiaa.cc.cd")
 ALT_SUBSCRIPTION_DOMAIN = os.environ.get("PROXY3X_ALT_SUBSCRIPTION_DOMAIN", "vpn-us.songjiaaa.ccwu.cc")
-SHADOWROCKET_NODE_SERVER = os.environ.get("PROXY3X_SHADOWROCKET_NODE_SERVER", "154.44.9.60")
+SHADOWROCKET_NODE_SERVER = os.environ.get("PROXY3X_SHADOWROCKET_NODE_SERVER", DEFAULT_SERVER)
 REALITY_SNI = os.environ.get("PROXY3X_REALITY_SNI", "www.amazon.com")
 SOCKS_PORT_START = int(os.environ.get("PROXY3X_SOCKS_PORT_START", "33001"))
 SOCKS_PORT_END = int(os.environ.get("PROXY3X_SOCKS_PORT_END", "33999"))
@@ -282,6 +283,21 @@ def init_db():
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS package_bindings (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              package_id INTEGER NOT NULL,
+              upstream_id INTEGER NOT NULL,
+              display_name TEXT NOT NULL DEFAULT '',
+              email TEXT NOT NULL DEFAULT '',
+              port INTEGER,
+              entry_json TEXT NOT NULL DEFAULT '',
+              enabled INTEGER NOT NULL DEFAULT 1,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(package_id, upstream_id)
+            );
             """
         )
         columns = {row["name"] for row in con.execute("PRAGMA table_info(packages)").fetchall()}
@@ -328,6 +344,22 @@ def init_db():
             WHERE expires_at IS NULL OR expires_at = 0
             """,
             (default_upstream_expires_at(),),
+        )
+        current = now()
+        con.execute(
+            """
+            INSERT OR IGNORE INTO package_bindings(
+              package_id, upstream_id, display_name, email, port, entry_json,
+              enabled, sort_order, created_at, updated_at
+            )
+            SELECT id, upstream_id, '', direct_email, direct_port, direct_entry_json,
+                   direct_node_enabled, 0, ?, ?
+            FROM packages
+            WHERE upstream_id IS NOT NULL
+              AND direct_port IS NOT NULL
+              AND direct_port > 0
+            """,
+            (current, current),
         )
 
 
@@ -562,6 +594,9 @@ def next_free_port():
                 used.add(int(row["direct_port"]))
             if row["residential_port"]:
                 used.add(int(row["residential_port"]))
+        for row in con.execute("SELECT port FROM package_bindings WHERE port IS NOT NULL"):
+            if row["port"]:
+                used.add(int(row["port"]))
     if CHAIN_DB.exists():
         con = sqlite3.connect(f"file:{CHAIN_DB}?mode=ro", uri=True)
         try:
@@ -695,7 +730,7 @@ def vless_uri(entry, node_name):
         "type": "tcp",
     }
     query = "&".join(f"{key}={quote(str(value), safe='')}" for key, value in params.items())
-    return f"vless://{entry['uuid']}@{SHADOWROCKET_NODE_SERVER}:{entry['port']}?{query}#{quote(node_name)}"
+    return f"vless://{entry['uuid']}@{server_host()}:{entry['port']}?{query}#{quote(node_name)}"
 
 
 def clash_node(entry, node_name):
@@ -717,6 +752,16 @@ def clash_node(entry, node_name):
 
 def package_nodes(package):
     package = dict(package)
+    bindings = package_binding_rows(package["id"])
+    if bindings:
+        nodes = []
+        for row in bindings:
+            entry = json.loads(row["entry_json"] or "{}")
+            if not entry:
+                continue
+            name = row["display_name"] or entry.get("node_name") or DEFAULT_NODE_NAME
+            nodes.append((name, entry))
+        return nodes
     entries = []
     node_specs = [
         ("direct_entry_json", bool(package.get("direct_node_enabled", 1))),
@@ -735,6 +780,82 @@ def package_nodes(package):
             name = DEFAULT_NODE_NAME
         nodes.append((name, entry))
     return nodes
+
+
+def package_binding_rows(package_id):
+    with connect_manager_db() as con:
+        return con.execute(
+            """
+            SELECT b.*, u.host, u.remark AS upstream_remark
+            FROM package_bindings b
+            JOIN upstreams u ON u.id = b.upstream_id
+            WHERE b.package_id = ? AND b.enabled = 1
+            ORDER BY b.sort_order, b.id
+            """,
+            (package_id,),
+        ).fetchall()
+
+
+def package_binding_all_rows(package_id):
+    with connect_manager_db() as con:
+        return con.execute(
+            """
+            SELECT b.*, u.host, u.remark AS upstream_remark
+            FROM package_bindings b
+            JOIN upstreams u ON u.id = b.upstream_id
+            WHERE b.package_id = ?
+            ORDER BY b.sort_order, b.id
+            """,
+            (package_id,),
+        ).fetchall()
+
+
+def package_binding_public_rows(package_id):
+    rows = package_binding_rows(package_id)
+    return [
+        {
+            "id": row["id"],
+            "upstream_id": row["upstream_id"],
+            "display_name": row["display_name"] or row["upstream_remark"] or row["host"] or "节点",
+            "port": row["port"],
+            "email": row["email"],
+            "sort_order": row["sort_order"],
+            "enabled": bool(row["enabled"]),
+        }
+        for row in rows
+    ]
+
+
+def package_runtime_entries(package):
+    package = dict(package)
+    rows = package_binding_all_rows(package["id"])
+    entries = [
+        {"port": row["port"], "email": row["email"], "enabled": bool(row["enabled"]), "kind": "binding"}
+        for row in rows
+        if row["port"] and row["email"]
+    ]
+    if entries:
+        return entries
+    legacy = []
+    if package.get("direct_port") and package.get("direct_email"):
+        legacy.append(
+            {
+                "port": package.get("direct_port"),
+                "email": package.get("direct_email"),
+                "enabled": bool(package.get("direct_enabled", 1)),
+                "kind": "direct",
+            }
+        )
+    if package.get("residential_port") and package.get("residential_email"):
+        legacy.append(
+            {
+                "port": package.get("residential_port"),
+                "email": package.get("residential_email"),
+                "enabled": bool(package.get("residential_enabled", 0)),
+                "kind": "residential",
+            }
+        )
+    return legacy
 
 
 def build_clash_yaml(package):
@@ -852,11 +973,12 @@ def update_deployment_manager_metadata():
 
     manager_packages = []
     for p in packages:
-        sources = []
-        if p["direct_email"] and p["direct_port"]:
-            sources.append({"email": p["direct_email"], "port": int(p["direct_port"])})
-        if p["residential_email"] and p["residential_port"]:
-            sources.append({"email": p["residential_email"], "port": int(p["residential_port"])})
+        sources = [
+            {"email": item["email"], "port": int(item["port"])}
+            for item in package_runtime_entries(p)
+            if item["email"] and item["port"]
+        ]
+        bindings = package_binding_public_rows(p["id"])
         manager_packages.append(
             {
                 "sub_id": p["sub_id"],
@@ -865,23 +987,28 @@ def update_deployment_manager_metadata():
                 "residential_gb": p["residential_gb"],
                 "expire": int(p["expires_at"] or 0),
                 "usage_sources": sources,
+                "bindings": bindings,
             }
         )
 
     data["manager_packages"] = manager_packages
-    data["proxy3x_manager"] = {
-        "updated_at": now(),
-        "panel": "https://proxy3x.sjiaa.cc.cd/",
-        "packages": [
+    public_packages = []
+    for p in packages:
+        bindings = package_binding_public_rows(p["id"])
+        public_packages.append(
             {
                 "sub_id": p["sub_id"],
                 "name": p["name"],
                 "direct_port": p["direct_port"],
                 "residential_port": p["residential_port"],
                 "upstream_id": p["upstream_id"],
+                "upstream_ids": [int(row["upstream_id"]) for row in bindings],
             }
-            for p in packages
-        ],
+        )
+    data["proxy3x_manager"] = {
+        "updated_at": now(),
+        "panel": "https://proxy3x.sjiaa.cc.cd/",
+        "packages": public_packages,
         "upstreams": [
             {
                 "id": u["id"],
@@ -1793,6 +1920,8 @@ def mask_secret(value):
 
 def upstream_public(row):
     item = dict(row)
+    display_name = upstream_display_name(item)
+    item["display_name"] = display_name
     item["password"] = mask_secret(item.get("password"))
     item["username"] = mask_secret(item.get("username"))
     quota_gb = float(item.get("quota_gb") or 0)
@@ -1801,6 +1930,16 @@ def upstream_public(row):
     item["expired"] = upstream_is_expired(item)
     item["expires_at_text"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(item["expires_at"] or 0))) if item.get("expires_at") else ""
     return item
+
+
+def upstream_display_name(upstream):
+    try:
+        internal = internal_socks_endpoint(upstream)
+    except Exception:
+        internal = None
+    if internal:
+        return internal["node_name"] or internal["remark"] or upstream.get("remark") or upstream.get("host") or "节点"
+    return upstream.get("remark") or upstream.get("host") or "节点"
 
 
 def tcp_connect(host, port, timeout=8):
@@ -1857,9 +1996,10 @@ def internal_socks_endpoint(upstream):
     with connect_manager_db() as con:
         row = con.execute(
             """
-            SELECT e.*, s.enabled AS source_enabled
+            SELECT e.*, s.enabled AS source_enabled, n.name AS node_name
             FROM socks_endpoints e
             JOIN socks_sources s ON s.id = e.source_id
+            JOIN socks_nodes n ON n.id = e.node_id
             WHERE e.listen_port = ? AND e.username = ? AND e.password = ?
             """,
             (port, upstream.get("username") or "", upstream.get("password") or ""),
@@ -1960,26 +2100,32 @@ def apply_xray_routes():
     with connect_manager_db() as con:
         packages = con.execute(
             """
-            SELECT p.*, u.protocol, u.host, u.port AS upstream_port, u.username, u.password, u.expires_at AS upstream_expires_at
-            FROM packages p
-            LEFT JOIN upstreams u ON u.id = p.upstream_id
-            ORDER BY p.id
+            SELECT *
+            FROM packages
+            ORDER BY id
             """
         ).fetchall()
         upstreams = con.execute("SELECT * FROM upstreams ORDER BY id").fetchall()
+        bindings = con.execute(
+            """
+            SELECT b.*, u.expires_at AS upstream_expires_at
+            FROM package_bindings b
+            JOIN upstreams u ON u.id = b.upstream_id
+            ORDER BY b.package_id, b.sort_order, b.id
+            """
+        ).fetchall()
 
     package_ports = set()
-    managed_ports = set()
+    binding_by_package = {}
+    for row in bindings:
+        binding_by_package.setdefault(int(row["package_id"]), []).append(row)
     for p in packages:
         for port in (p["direct_port"], p["residential_port"]):
             if port:
                 package_ports.add(int(port))
-        if not p["upstream_id"]:
-            continue
-        if p["direct_port"]:
-            managed_ports.add(int(p["direct_port"]))
-        if p["residential_port"]:
-            managed_ports.add(int(p["residential_port"]))
+    for row in bindings:
+        if row["port"]:
+            package_ports.add(int(row["port"]))
     tag_by_port = inbound_tag_map()
     package_tags = {tag_by_port.get(port, f"inbound-{port}") for port in package_ports}
     xray = fetch_xray_template()
@@ -2012,26 +2158,36 @@ def apply_xray_routes():
     new_rules = []
     current = now()
     for p in packages:
-        ports = [port for port in (p["direct_port"], p["residential_port"]) if port]
-        if not ports:
+        rows = binding_by_package.get(int(p["id"])) or []
+        if rows:
+            for row in rows:
+                if not row["port"]:
+                    continue
+                blocked = (
+                    not p["enabled"]
+                    or not row["enabled"]
+                    or package_is_expired(p, current)
+                    or bool(row["upstream_expires_at"] and int(row["upstream_expires_at"]) <= current)
+                )
+                new_rules.append(
+                    {
+                        "type": "field",
+                        "inboundTag": [tag_by_port.get(int(row["port"]), f"inbound-{int(row['port'])}")],
+                        "outboundTag": BLOCK_OUTBOUND_TAG if blocked else f"proxy3x-upstream-{int(row['upstream_id'])}",
+                    }
+                )
             continue
-        upstream_expired = bool(p["upstream_expires_at"] and int(p["upstream_expires_at"]) <= current)
-        if not p["upstream_id"] or upstream_expired:
+
+        ports = [port for port in (p["direct_port"], p["residential_port"]) if port]
+        if ports:
+            blocked = not p["enabled"] or package_is_expired(p, current) or not p["upstream_id"]
             new_rules.append(
                 {
                     "type": "field",
                     "inboundTag": [tag_by_port.get(int(port), f"inbound-{int(port)}") for port in ports],
-                    "outboundTag": BLOCK_OUTBOUND_TAG,
+                    "outboundTag": BLOCK_OUTBOUND_TAG if blocked else f"proxy3x-upstream-{int(p['upstream_id'])}",
                 }
             )
-            continue
-        new_rules.append(
-            {
-                "type": "field",
-                "inboundTag": [tag_by_port.get(int(port), f"inbound-{int(port)}") for port in ports],
-                "outboundTag": f"proxy3x-upstream-{int(p['upstream_id'])}",
-            }
-        )
 
     insert_at = 1 if kept_rules and kept_rules[0].get("inboundTag") == ["api"] else 0
     xray["routing"]["rules"] = kept_rules[:insert_at] + new_rules + kept_rules[insert_at:]
@@ -2098,6 +2254,8 @@ def refresh_routes_best_effort(action):
         return True
     except Exception as exc:
         log_event("警告", f"{action}：路由刷新失败：{exc}")
+        if os.name == "nt":
+            return False
         if "HTTP Error 404" in str(exc):
             restart_xui_container(f"{action}：3x-ui 路由接口 404")
             return False
@@ -2162,9 +2320,11 @@ def delete_package(package_id):
         if not row:
             raise ValueError("套餐不存在")
         package = dict(row)
+        entries = package_runtime_entries(package)
+        con.execute("DELETE FROM package_bindings WHERE package_id = ?", (package_id,))
         con.execute("DELETE FROM packages WHERE id = ?", (package_id,))
-    ports = [package.get("direct_port"), package.get("residential_port")]
-    emails = [package.get("direct_email"), package.get("residential_email")]
+    ports = [item["port"] for item in entries]
+    emails = [item["email"] for item in entries]
     disabled = disable_xui_inbounds(ports, emails)
     removed = delete_xui_inbounds(ports, emails)
     delete_subscription_files(package["sub_id"])
@@ -2175,9 +2335,10 @@ def delete_package(package_id):
 
 
 def finish_package_delete(package):
+    entries = package_runtime_entries(package)
     removed_inbounds = delete_xui_inbounds(
-        [package.get("direct_port"), package.get("residential_port")],
-        [package.get("direct_email"), package.get("residential_email")],
+        [item["port"] for item in entries],
+        [item["email"] for item in entries],
     )
     refresh_routes_best_effort(f"{package['name']} 删除后台清理")
     generate_subscriptions()
@@ -2227,12 +2388,24 @@ def sync_client_limit(port, email, total_bytes):
 
 def package_usage(package, traffic=None):
     traffic = traffic or traffic_map()
-    direct = traffic.get((package["direct_email"], int(package["direct_port"] or 0)), {})
-    residential = traffic.get((package["residential_email"], int(package["residential_port"] or 0)), {})
-    upload = int(direct.get("up") or 0) + int(residential.get("up") or 0)
-    download = int(direct.get("down") or 0) + int(residential.get("down") or 0)
-    direct_used = int(direct.get("up") or 0) + int(direct.get("down") or 0)
-    residential_used = int(residential.get("up") or 0) + int(residential.get("down") or 0)
+    entries = package_runtime_entries(package)
+    upload = 0
+    download = 0
+    direct_used = 0
+    residential_used = 0
+    runtime_enabled = True
+    for item in entries:
+        row = traffic.get((item["email"], int(item["port"] or 0)), {})
+        up = int(row.get("up") or 0)
+        down = int(row.get("down") or 0)
+        used = up + down
+        upload += up
+        download += down
+        if item["kind"] == "residential":
+            residential_used += used
+        else:
+            direct_used += used
+        runtime_enabled = runtime_enabled and bool(row.get("inbound_enable", item["enabled"]))
     total_used = direct_used + residential_used
     return {
         "upload": upload,
@@ -2243,8 +2416,8 @@ def package_usage(package, traffic=None):
         "direct_used_gb": gb_from_bytes(direct_used),
         "residential_used_gb": gb_from_bytes(residential_used),
         "total_used_gb": gb_from_bytes(total_used),
-        "direct_runtime_enabled": bool(direct.get("inbound_enable", package["direct_enabled"])),
-        "residential_runtime_enabled": bool(residential.get("inbound_enable", package["residential_enabled"])),
+        "direct_runtime_enabled": runtime_enabled if entries else bool(package["direct_enabled"]),
+        "residential_runtime_enabled": bool(package["residential_enabled"]),
     }
 
 
@@ -2287,8 +2460,13 @@ def disable_expired_packages(con, packages):
     for p in packages:
         if not p["enabled"] or not package_is_expired(p, current):
             continue
-        set_inbound_enabled(p["direct_port"], p["direct_email"], False)
-        set_inbound_enabled(p["residential_port"], p["residential_email"], False)
+        entries = package_runtime_entries(p)
+        for item in entries:
+            set_inbound_enabled(item["port"], item["email"], False)
+        binding_ids = [row["id"] for row in package_binding_all_rows(p["id"])]
+        if binding_ids:
+            placeholders = ",".join("?" for _ in binding_ids)
+            con.execute(f"UPDATE package_bindings SET enabled = 0, updated_at = ? WHERE id IN ({placeholders})", [current, *binding_ids])
         con.execute(
             """
             UPDATE packages
@@ -2389,8 +2567,15 @@ def enforce_quotas():
                     changed += 1
                     chain_changed += 1
             if total_limit and usage["total_used"] >= total_limit and p["enabled"]:
-                set_inbound_enabled(p["direct_port"], p["direct_email"], False)
-                set_inbound_enabled(p["residential_port"], p["residential_email"], False)
+                for item in package_runtime_entries(p):
+                    set_inbound_enabled(item["port"], item["email"], False)
+                binding_ids = [row["id"] for row in package_binding_all_rows(p["id"])]
+                if binding_ids:
+                    placeholders = ",".join("?" for _ in binding_ids)
+                    con.execute(
+                        f"UPDATE package_bindings SET enabled = 0, updated_at = ? WHERE id IN ({placeholders})",
+                        [now(), *binding_ids],
+                    )
                 con.execute(
                     "UPDATE packages SET enabled = 0, direct_enabled = 0, residential_enabled = 0, disabled_reason = '额度用完', updated_at = ? WHERE id = ?",
                     (now(), p["id"]),
@@ -2416,7 +2601,7 @@ def ensure_residential_node(package_id):
         if not p["upstream_id"]:
             raise RuntimeError("请先选择家宽池")
         if p["residential_entry_json"] and p["residential_port"]:
-            apply_xray_routes()
+            refresh_routes_best_effort("住宅节点刷新")
             generate_subscriptions()
             return "住宅节点已存在，已刷新路由和订阅"
         port = next_free_port()
@@ -2439,10 +2624,158 @@ def ensure_residential_node(package_id):
             """,
             (entry["email"], port, json_dumps(entry), now(), package_id),
         )
-    apply_xray_routes()
+    refresh_routes_best_effort("创建住宅节点后刷新")
     generate_subscriptions()
     log_event("信息", f"已为 {p['name']} 创建住宅节点端口 {port}")
     return "已创建住宅节点"
+
+
+def package_upstream_ids(payload):
+    raw = payload.get("upstream_ids")
+    if raw is None:
+        raw = [payload.get("upstream_id")] if payload.get("upstream_id") else []
+    if not isinstance(raw, list):
+        raw = [raw]
+    ids = []
+    for item in raw:
+        try:
+            upstream_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if upstream_id and upstream_id not in ids:
+            ids.append(upstream_id)
+    return ids
+
+
+def default_upstream_ids():
+    with connect_manager_db() as con:
+        rows = con.execute(
+            """
+            SELECT id
+            FROM upstreams
+            WHERE protocol = 'socks'
+              AND (expires_at = 0 OR expires_at > ?)
+              AND status != '不可用'
+            ORDER BY id
+            """,
+            (now(),),
+        ).fetchall()
+    return [int(row["id"]) for row in rows[:1]]
+
+
+def load_upstream_map(ids):
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    with connect_manager_db() as con:
+        rows = con.execute(f"SELECT * FROM upstreams WHERE id IN ({placeholders})", ids).fetchall()
+    return {int(row["id"]): dict(row) for row in rows}
+
+
+def make_package_binding(package_id, package, upstream, order):
+    display_name = upstream_display_name(upstream)
+    port = next_free_port()
+    email = f"{package['sub_id']}-u{upstream['id']}-{order + 1}"
+    entry = make_inbound_best_effort(
+        {
+            "sub_id": package["sub_id"],
+            "email": email,
+            "remark": email,
+            "node_name": display_name,
+            "port": port,
+            "total_bytes": bytes_from_gb(package["total_gb"]),
+        }
+    )
+    current = now()
+    with connect_manager_db() as con:
+        con.execute(
+            """
+            INSERT OR REPLACE INTO package_bindings(
+              package_id, upstream_id, display_name, email, port, entry_json,
+              enabled, sort_order, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            """,
+            (
+                package_id,
+                int(upstream["id"]),
+                display_name,
+                email,
+                port,
+                json_dumps(entry),
+                order,
+                current,
+                current,
+            ),
+        )
+    return entry
+
+
+def sync_package_bindings(package_id, upstream_ids):
+    with connect_manager_db() as con:
+        package = con.execute("SELECT * FROM packages WHERE id = ?", (package_id,)).fetchone()
+        current_rows = con.execute("SELECT * FROM package_bindings WHERE package_id = ?", (package_id,)).fetchall()
+    if not package:
+        raise ValueError("套餐不存在")
+    package = dict(package)
+    upstreams = load_upstream_map(upstream_ids)
+    if len(upstreams) != len(upstream_ids):
+        raise ValueError("选择的 SOCKS5 不存在")
+
+    current_by_upstream = {int(row["upstream_id"]): dict(row) for row in current_rows}
+    remove_rows = [row for row in current_rows if int(row["upstream_id"]) not in upstream_ids]
+    if remove_rows:
+        disable_xui_inbounds([row["port"] for row in remove_rows], [row["email"] for row in remove_rows])
+        delete_xui_inbounds([row["port"] for row in remove_rows], [row["email"] for row in remove_rows])
+
+    first_entry = None
+    first_upstream_id = upstream_ids[0] if upstream_ids else None
+    for order, upstream_id in enumerate(upstream_ids):
+        upstream = upstreams[upstream_id]
+        current = current_by_upstream.get(upstream_id)
+        display_name = upstream_display_name(upstream)
+        if current:
+            if not first_entry:
+                first_entry = json.loads(current["entry_json"] or "{}")
+            with connect_manager_db() as con:
+                con.execute(
+                    """
+                    UPDATE package_bindings
+                    SET display_name = ?, sort_order = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (display_name, order, now(), current["id"]),
+                )
+            sync_client_limit(current["port"], current["email"], bytes_from_gb(package["total_gb"]))
+            continue
+        entry = make_package_binding(package_id, package, upstream, order)
+        if not first_entry:
+            first_entry = entry
+
+    with connect_manager_db() as con:
+        if remove_rows:
+            placeholders = ",".join("?" for _ in remove_rows)
+            con.execute(f"DELETE FROM package_bindings WHERE id IN ({placeholders})", [row["id"] for row in remove_rows])
+        first = con.execute(
+            "SELECT * FROM package_bindings WHERE package_id = ? ORDER BY sort_order, id LIMIT 1",
+            (package_id,),
+        ).fetchone()
+        con.execute(
+            """
+            UPDATE packages
+            SET upstream_id = ?, direct_email = ?, direct_port = ?, direct_entry_json = ?,
+                direct_node_enabled = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(first_upstream_id) if first_upstream_id else None,
+                first["email"] if first else "",
+                int(first["port"]) if first and first["port"] else None,
+                first["entry_json"] if first else "",
+                1 if first else 0,
+                now(),
+                package_id,
+            ),
+        )
 
 
 def create_package(payload):
@@ -2462,40 +2795,17 @@ def create_package(payload):
         raise ValueError("额度需要填写数字")
     if total_gb <= 0:
         raise ValueError("总额度需要大于 0")
-    upstream_id = payload.get("upstream_id") or None
-    if not upstream_id:
-        with connect_manager_db() as con:
-            row = con.execute(
-                """
-                SELECT id
-                FROM upstreams
-                WHERE protocol = 'socks'
-                  AND (expires_at = 0 OR expires_at > ?)
-                  AND status != '不可用'
-                ORDER BY id
-                LIMIT 1
-                """,
-                (now(),),
-            ).fetchone()
-            upstream_id = row["id"] if row else None
-    if not upstream_id:
+    upstream_ids = package_upstream_ids(payload) or default_upstream_ids()
+    if not upstream_ids:
         raise ValueError("请先添加一个 SOCKS5 上游")
+    upstreams = load_upstream_map(upstream_ids)
+    if len(upstreams) != len(upstream_ids):
+        raise ValueError("选择的 SOCKS5 不存在")
     notes = payload.get("notes") or ""
     expires_at = parse_expires_at(payload.get("expires_at"))
     with connect_manager_db() as con:
         if con.execute("SELECT id FROM packages WHERE sub_id = ?", (sub_id,)).fetchone():
             raise ValueError("订阅名已存在，请换一个")
-    direct_port = next_free_port()
-    direct_entry = make_inbound_best_effort(
-        {
-            "sub_id": sub_id,
-            "email": f"{sub_id}-node",
-            "remark": f"{sub_id}-node",
-            "node_name": DEFAULT_NODE_NAME,
-            "port": direct_port,
-            "total_bytes": bytes_from_gb(total_gb),
-        }
-    )
     with connect_manager_db() as con:
         con.execute(
             """
@@ -2510,16 +2820,17 @@ def create_package(payload):
                 total_gb,
                 residential_gb,
                 notes,
-                int(upstream_id) if upstream_id else None,
-                direct_entry["email"],
-                direct_port,
-                json_dumps(direct_entry),
+                int(upstream_ids[0]) if upstream_ids else None,
+                "",
+                None,
+                "",
                 expires_at,
                 now(),
                 now(),
             ),
         )
         package_id = con.execute("SELECT id FROM packages WHERE sub_id = ?", (sub_id,)).fetchone()["id"]
+    sync_package_bindings(package_id, upstream_ids)
     log_event("信息", f"已新增用户 {name}")
     run_background("创建后刷新", finish_package_create, package_id)
     message = "用户已创建，链式路由和订阅正在后台刷新"
@@ -2551,13 +2862,21 @@ def dashboard_data(base_url=None):
     residential_used = 0
     upstream_usage = {int(u["id"]): 0 for u in upstreams}
     for p in packages:
+        bindings = package_binding_public_rows(p["id"])
         usage = package_usage(p, traffic)
         total_used += usage["total_used"]
         total_limit += bytes_from_gb(p["total_gb"])
         residential_used += usage["residential_used"]
-        if p.get("upstream_id"):
-            upstream_usage[int(p["upstream_id"])] = upstream_usage.get(int(p["upstream_id"]), 0) + usage["residential_used"]
+        if bindings:
+            used_each = int(usage["total_used"] / len(bindings)) if bindings else 0
+            for binding in bindings:
+                upstream_id = int(binding["upstream_id"])
+                upstream_usage[upstream_id] = upstream_usage.get(upstream_id, 0) + used_each
+        elif p.get("upstream_id"):
+            upstream_usage[int(p["upstream_id"])] = upstream_usage.get(int(p["upstream_id"]), 0) + usage["total_used"]
         p.update(usage)
+        p["bindings"] = bindings
+        p["upstream_ids"] = [int(row["upstream_id"]) for row in bindings] or ([int(p["upstream_id"])] if p.get("upstream_id") else [])
         p["total_bytes"] = bytes_from_gb(p["total_gb"])
         p["residential_bytes"] = bytes_from_gb(p["residential_gb"])
         p["expired"] = package_is_expired(p)
@@ -2727,7 +3046,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/regenerate" and self.command == "POST":
             generate_subscriptions()
-            self.send_json({"ok": True, "message": "订阅已刷新"})
+            route_ok = refresh_routes_best_effort("手动刷新订阅")
+            self.send_json({"ok": True, "message": "订阅和路由已刷新" if route_ok else "订阅已刷新，路由刷新失败已写入日志"})
             return
         if path == "/api/socks-sources":
             if self.command == "GET":
@@ -2914,6 +3234,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self.read_json()
                 item = parse_upstream_line(payload.get("line") or "")
                 remark = payload.get("remark") or ""
+                if not remark:
+                    internal = internal_socks_endpoint(item)
+                    if internal:
+                        remark = internal["node_name"] or internal["remark"] or ""
                 assigned_to = payload.get("assigned_to") or ""
                 try:
                     quota_gb = float(payload.get("quota_gb") or 0)
@@ -3102,6 +3426,12 @@ class Handler(BaseHTTPRequestHandler):
         if match and self.command == "PUT":
             package_id = int(match.group(1))
             payload = self.read_json()
+            upstream_ids = package_upstream_ids(payload)
+            if not upstream_ids and payload.get("upstream_id"):
+                upstream_ids = package_upstream_ids({"upstream_id": payload.get("upstream_id")})
+            if "upstream_ids" in payload and not upstream_ids:
+                self.send_json({"ok": False, "message": "请选择至少一个 SOCKS5 节点"}, 400)
+                return
             with connect_manager_db() as con:
                 con.execute(
                     """
@@ -3121,14 +3451,24 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
                 row = con.execute("SELECT * FROM packages WHERE id = ?", (package_id,)).fetchone()
+            if not row:
+                self.send_json({"ok": False, "message": "套餐不存在"}, 404)
+                return
+            if upstream_ids:
+                try:
+                    sync_package_bindings(package_id, upstream_ids)
+                except ValueError as exc:
+                    self.send_json({"ok": False, "message": str(exc)}, 400)
+                    return
+                with connect_manager_db() as con:
+                    row = con.execute("SELECT * FROM packages WHERE id = ?", (package_id,)).fetchone()
             changed_limit = False
-            if row:
-                changed_limit = sync_client_limit(row["direct_port"], row["direct_email"], bytes_from_gb(row["total_gb"])) or changed_limit
-                changed_limit = sync_client_limit(row["residential_port"], row["residential_email"], bytes_from_gb(row["residential_gb"])) or changed_limit
+            for item in package_runtime_entries(row):
+                changed_limit = sync_client_limit(item["port"], item["email"], bytes_from_gb(row["total_gb"])) or changed_limit
             if changed_limit:
                 restart_xray()
             generate_subscriptions()
-            apply_xray_routes()
+            refresh_routes_best_effort("保存套餐后刷新")
             self.send_json({"ok": True, "message": "已保存"})
             return
         match = re.match(r"^/api/packages/(\d+)/residential$", path)
@@ -3140,7 +3480,7 @@ class Handler(BaseHTTPRequestHandler):
         if match and self.command == "POST":
             enforce_quotas()
             generate_subscriptions()
-            apply_xray_routes()
+            refresh_routes_best_effort("套餐手动同步")
             self.send_json({"ok": True, "message": "已巡检并刷新"})
             return
         self.send_json({"ok": False, "message": "接口不存在"}, 404)

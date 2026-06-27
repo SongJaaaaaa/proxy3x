@@ -14,6 +14,16 @@ export interface Summary {
 }
 
 /** 用户套餐（packages 表 + 实时用量） */
+export interface PackageBinding {
+  id: number
+  upstream_id: number
+  display_name: string
+  port: number | null
+  email: string
+  sort_order: number
+  enabled: boolean
+}
+
 export interface Package {
   id: number
   name: string
@@ -29,6 +39,8 @@ export interface Package {
   direct_port: number | null
   residential_port: number | null
   upstream_id: number | null
+  upstream_ids: number[]
+  bindings: PackageBinding[]
   direct_runtime_enabled: boolean
   residential_runtime_enabled: boolean
   enabled: boolean
@@ -49,6 +61,7 @@ export interface Upstream {
   username: string // 已遮罩
   password: string // 已遮罩
   remark: string
+  display_name: string
   assigned_to: string
   status: string // 可用 / 不可用 / 未检测
   last_error: string
@@ -179,6 +192,7 @@ export interface CreatePackageBody {
   total_gb: number
   residential_gb: number
   upstream_id?: number | null
+  upstream_ids?: number[]
   notes?: string
   expires_at?: string | number | null
 }
@@ -190,6 +204,7 @@ export interface UpdatePackageBody {
   residential_gb: number
   notes?: string
   upstream_id?: number | null
+  upstream_ids?: number[]
   expires_at?: string | number | null
 }
 

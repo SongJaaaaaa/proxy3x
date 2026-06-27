@@ -84,7 +84,7 @@ async function onSubmit(payload: {
   sub_id: string
   total_gb: number
   residential_gb: number
-  upstream_id: number | null
+  upstream_ids: number[]
   expires_at: string
   notes: string
 }) {
@@ -95,7 +95,7 @@ async function onSubmit(payload: {
         name: payload.name,
         total_gb: payload.total_gb,
         residential_gb: payload.residential_gb,
-        upstream_id: payload.upstream_id,
+        upstream_ids: payload.upstream_ids,
         expires_at: payload.expires_at || null,
         notes: payload.notes,
       })
@@ -106,7 +106,7 @@ async function onSubmit(payload: {
         sub_id: payload.sub_id,
         total_gb: payload.total_gb,
         residential_gb: payload.residential_gb,
-        upstream_id: payload.upstream_id,
+        upstream_ids: payload.upstream_ids,
         expires_at: payload.expires_at || null,
         notes: payload.notes,
       })
@@ -117,23 +117,6 @@ async function onSubmit(payload: {
     formRef.value?.setError(e instanceof ApiError ? e.message : '操作失败')
   } finally {
     submitting.value = false
-  }
-}
-
-async function onBind(p: Package, upstreamId: number | null) {
-  try {
-    await store.updatePackage(p.id, {
-      name: p.name,
-      total_gb: p.total_gb,
-      residential_gb: p.residential_gb,
-      notes: p.notes,
-      upstream_id: upstreamId,
-      expires_at: p.expires_at || null,
-    })
-    toast.success('已更新绑定 SOCKS5')
-  } catch (e) {
-    toast.error(e instanceof ApiError ? e.message : '更新失败')
-    await store.refresh()
   }
 }
 
@@ -229,7 +212,6 @@ async function onRegenerate() {
         :upstreams="store.upstreams"
         @edit="openEdit"
         @remove="askRemove"
-        @bind="onBind"
       />
     </div>
 
