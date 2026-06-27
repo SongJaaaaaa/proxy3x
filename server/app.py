@@ -1239,6 +1239,8 @@ def tls_from_query(params, enabled=False):
     fp = (params.get("fp") or [""])[0]
     if fp:
         tls["utls"] = {"enabled": True, "fingerprint": fp}
+    if (params.get("allowInsecure") or params.get("allow_insecure") or params.get("skip-cert-verify") or [""])[0] in ("1", "true", "True"):
+        tls["insecure"] = True
     if security == "reality":
         reality = {"enabled": True}
         pbk = (params.get("pbk") or params.get("public-key") or [""])[0]
@@ -1323,6 +1325,8 @@ def parse_uri_node(line):
         }
         if str(cfg.get("tls") or "").lower() == "tls":
             config["tls"] = {"enabled": True, "server_name": cfg.get("sni") or cfg.get("host") or server}
+            if str(cfg.get("allowInsecure") or cfg.get("allow_insecure") or cfg.get("skip-cert-verify") or "").lower() in ("1", "true"):
+                config["tls"]["insecure"] = True
         transport = vmess_transport(cfg)
         if transport:
             config["transport"] = transport
@@ -1418,6 +1422,8 @@ def clash_proxy_to_node(item):
             sni = item.get("servername") or item.get("sni") or item.get("server_name")
             if sni:
                 tls["server_name"] = sni
+            if item.get("skip-cert-verify") is True or str(item.get("skip-cert-verify") or item.get("allow-insecure") or "").lower() in ("1", "true"):
+                tls["insecure"] = True
             fp = item.get("client-fingerprint") or item.get("fingerprint")
             if fp:
                 tls["utls"] = {"enabled": True, "fingerprint": fp}
@@ -1675,6 +1681,9 @@ def socks_factory_data(source_id=None, base_url=None):
 def sing_box_outbound(row):
     cfg = json.loads(row["config_json"] or "{}")
     cfg["tag"] = f"source-node-{int(row['node_id'])}"
+    tls = cfg.get("tls")
+    if isinstance(tls, dict) and tls.get("enabled"):
+        tls.setdefault("insecure", True)
     return cfg
 
 
@@ -2046,16 +2055,20 @@ def check_upstream(upstream):
 
 
 def xray_outbound_for_upstream(row):
+    row = dict(row)
     users = []
     if row["username"] or row["password"]:
         users = [{"user": row["username"], "pass": row["password"]}]
+    address = row["host"]
+    if internal_socks_endpoint(row):
+        address = node_host()
     return {
         "tag": f"proxy3x-upstream-{row['id']}",
         "protocol": "socks",
         "settings": {
             "servers": [
                 {
-                    "address": row["host"],
+                    "address": address,
                     "port": int(row["port"]),
                     "users": users,
                 }
