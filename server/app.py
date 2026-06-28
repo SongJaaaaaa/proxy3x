@@ -2121,6 +2121,7 @@ def endpoint_speed_upstream(row):
 
 def speed_test_socks_endpoint(endpoint_id):
     current = now()
+    error = ""
     with connect_manager_db() as con:
         row = con.execute(
             """
@@ -2156,6 +2157,7 @@ def speed_test_socks_endpoint(endpoint_id):
             )
             return speed
         except Exception as exc:
+            error = str(exc) or type(exc).__name__
             con.execute(
                 """
                 UPDATE socks_endpoints
@@ -2170,13 +2172,14 @@ def speed_test_socks_endpoint(endpoint_id):
                 SET status = '不可用', speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (current, str(exc), current, row["node_id"]),
+                (current, error, current, row["node_id"]),
             )
-            raise
+    raise RuntimeError(error)
 
 
 def speed_test_upstream(upstream_id):
     current = now()
+    error = ""
     with connect_manager_db() as con:
         row = con.execute("SELECT * FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
         if not row:
@@ -2222,9 +2225,10 @@ def speed_test_upstream(upstream_id):
                 )
             return speed
         except Exception as exc:
+            error = str(exc) or type(exc).__name__
             con.execute(
                 "UPDATE upstreams SET status = '不可用', last_error = ?, speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
-                (str(exc), current, current, upstream_id),
+                (error, current, current, upstream_id),
             )
             if internal:
                 con.execute(
@@ -2233,9 +2237,9 @@ def speed_test_upstream(upstream_id):
                 )
                 con.execute(
                     "UPDATE socks_nodes SET status = '不可用', speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
-                    (current, str(exc), current, internal["node_id"]),
+                    (current, error, current, internal["node_id"]),
                 )
-            raise
+    raise RuntimeError(error)
 
 
 def internal_socks_endpoint(upstream):
