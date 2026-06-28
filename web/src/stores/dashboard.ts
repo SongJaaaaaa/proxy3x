@@ -89,6 +89,11 @@ export const useDashboardStore = defineStore('dashboard', () => {
     await refresh()
     return r
   }
+  async function speedTestUpstream(id: number) {
+    const r = await api.speedTestUpstream(id)
+    await refresh()
+    return r
+  }
   async function deleteUpstream(id: number) {
     const r = await api.deleteUpstream(id)
     await refresh()
@@ -118,6 +123,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     createUpstream,
     updateUpstream,
     checkUpstream,
+    speedTestUpstream,
     deleteUpstream,
     revealUpstream,
   }

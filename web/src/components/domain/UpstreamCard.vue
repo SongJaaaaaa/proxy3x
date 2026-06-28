@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Upstream } from '@/types/dashboard'
-import { fromUnix, gb } from '@/lib/format'
+import { fromUnix, gb, speed } from '@/lib/format'
 import Icon from '@/components/ui/Icon.vue'
 import Badge from '@/components/ui/Badge.vue'
 import ProgressBar from '@/components/ui/ProgressBar.vue'
@@ -13,7 +13,7 @@ import ProgressBar from '@/components/ui/ProgressBar.vue'
  * 底部：检测 / 编辑 / 删除。
  */
 const props = defineProps<{ item: Upstream; busy?: boolean }>()
-const emit = defineEmits<{ check: []; edit: []; remove: []; view: [] }>()
+const emit = defineEmits<{ check: []; speedTest: []; edit: []; remove: []; view: [] }>()
 
 const available = computed(() => props.item.status === '可用')
 const failed = computed(() => props.item.status === '不可用')
@@ -75,6 +75,17 @@ const expireText = computed(() => props.item.expires_at_text || fromUnix(props.i
       </span>
     </div>
 
+    <!-- 测速 -->
+    <div
+      class="bg-surface-container-lowest/40 rounded-md p-2 flex items-center gap-2 border border-outline-variant/20"
+      :class="{ 'opacity-70': dimmed }"
+    >
+      <Icon name="speed" :size="16" class="text-outline" />
+      <span class="font-code-xs text-code-xs truncate text-on-surface-variant">
+        速度 {{ speed(item.speed_bps) }}
+      </span>
+    </div>
+
     <!-- 用量进度 -->
     <div class="flex flex-col gap-1.5 mt-2" :class="{ 'opacity-70': dimmed }">
       <div class="flex justify-between items-end">
@@ -98,6 +109,14 @@ const expireText = computed(() => props.item.expires_at_text || fromUnix(props.i
       >
         <Icon :name="failed ? 'refresh' : item.status === '未检测' ? 'play_arrow' : 'network_ping'" :size="16" />
         {{ failed ? '重试' : item.status === '未检测' ? '开始检测' : '检测' }}
+      </button>
+      <button
+        class="flex-1 h-8 rounded border border-outline-variant/50 text-on-surface-variant hover:text-primary hover:border-primary/50 font-label-sm text-label-sm flex items-center justify-center gap-1 transition-colors bg-surface-container-lowest/30 disabled:opacity-50"
+        :disabled="busy"
+        @click="emit('speedTest')"
+      >
+        <Icon name="speed" :size="16" />
+        测速
       </button>
       <button
         class="w-10 h-8 rounded border border-outline-variant/50 text-on-surface-variant hover:text-primary hover:border-primary/50 flex items-center justify-center transition-colors bg-surface-container-lowest/30"

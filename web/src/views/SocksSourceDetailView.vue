@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { useSocksFactoryStore } from '@/stores/socksFactory'
 import { usePolling } from '@/composables/usePolling'
-import { fromUnix, gb } from '@/lib/format'
+import { fromUnix, gb, speed } from '@/lib/format'
 import { ApiError } from '@/api/errors'
 import type { SocksEndpoint } from '@/types/dashboard'
 import AppShell from '@/components/layout/AppShell.vue'
@@ -144,6 +144,19 @@ async function toggleOne(item: SocksEndpoint) {
   }
 }
 
+async function speedTestOne(item: SocksEndpoint) {
+  if (!source.value) return
+  busy.value = `speed-${item.id}`
+  try {
+    const r = await store.speedTestEndpoint(item.id, source.value.id)
+    r.ok ? toast.success(r.message || '测速完成') : toast.error(r.message || '测速失败')
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '测速失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
 function openEdit(item: SocksEndpoint) {
   editing.value = item
   editOpen.value = true
@@ -269,17 +282,18 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
         </div>
 
         <div class="overflow-x-auto">
-          <table class="w-full min-w-[1050px] text-sm">
+          <table class="w-full min-w-[1160px] text-sm">
             <thead class="text-left text-outline border-b border-outline-variant/30">
               <tr>
                 <th class="py-3 px-3">节点</th>
                 <th class="py-3 px-3 w-24">协议</th>
                 <th class="py-3 px-3 w-28">端口</th>
                 <th class="py-3 px-3 w-36">账号</th>
+                <th class="py-3 px-3 w-32">速度</th>
                 <th class="py-3 px-3 w-56">流量</th>
                 <th class="py-3 px-3 w-44">到期</th>
                 <th class="py-3 px-3 w-28">状态</th>
-                <th class="py-3 px-3 w-36 text-right">操作</th>
+                <th class="py-3 px-3 w-44 text-right">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -293,6 +307,12 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
                 </td>
                 <td class="py-3 px-3 font-code-xs text-on-surface">{{ item.listen_port }}</td>
                 <td class="py-3 px-3 font-code-xs text-outline">{{ item.username }}</td>
+                <td class="py-3 px-3">
+                  <div class="flex items-center gap-1.5 text-on-surface-variant">
+                    <Icon name="speed" :size="16" class="text-outline" />
+                    <span class="font-code-xs text-code-xs">{{ speed(item.speed_bps) }}</span>
+                  </div>
+                </td>
                 <td class="py-3 px-3">
                   <div class="flex justify-between text-xs text-on-surface-variant mb-1">
                     <span>{{ gb(item.used_gb, 2) }}</span>
@@ -313,6 +333,13 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
                     </button>
                     <button class="p-2 rounded hover:bg-surface-variant/30 text-on-surface-variant" title="设置" @click="openEdit(item)">
                       <Icon name="tune" :size="18" />
+                    </button>
+                    <button class="p-2 rounded hover:bg-surface-variant/30 text-on-surface-variant" title="测速" @click="speedTestOne(item)">
+                      <Icon
+                        :name="busy === `speed-${item.id}` ? 'progress_activity' : 'speed'"
+                        :size="18"
+                        :class="busy === `speed-${item.id}` ? 'animate-spin' : ''"
+                      />
                     </button>
                     <button class="p-2 rounded hover:bg-surface-variant/30 text-on-surface-variant" title="启用/停用" @click="toggleOne(item)">
                       <Icon

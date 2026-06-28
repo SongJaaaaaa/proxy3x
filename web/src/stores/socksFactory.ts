@@ -111,6 +111,13 @@ export const useSocksFactoryStore = defineStore('socksFactory', () => {
     return r
   }
 
+  async function speedTestEndpoint(id: number, sourceId: number) {
+    const r = await api.speedTestSocksEndpoint(id)
+    await loadSource(sourceId)
+    await refreshList()
+    return r
+  }
+
   return {
     sources,
     current,
@@ -132,5 +139,6 @@ export const useSocksFactoryStore = defineStore('socksFactory', () => {
     revealEndpoint,
     toggleEndpoint,
     updateEndpoint,
+    speedTestEndpoint,
   }
 })

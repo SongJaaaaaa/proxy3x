@@ -60,6 +60,7 @@ const editing = ref<Upstream | null>(null)
 const formRef = ref<InstanceType<typeof UpstreamFormDialog> | null>(null)
 const submitting = ref(false)
 const checkingId = ref<number | null>(null)
+const speedTestingId = ref<number | null>(null)
 
 const confirmOpen = ref(false)
 const removing = ref<Upstream | null>(null)
@@ -154,6 +155,18 @@ async function onCheck(u: Upstream) {
   }
 }
 
+async function onSpeedTest(u: Upstream) {
+  speedTestingId.value = u.id
+  try {
+    const r = await store.speedTestUpstream(u.id)
+    r.ok ? toast.success(r.message || '测速完成') : toast.error(r.message || '测速失败')
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '测速失败')
+  } finally {
+    speedTestingId.value = null
+  }
+}
+
 function askRemove(u: Upstream) {
   removing.value = u
   confirmOpen.value = true
@@ -243,8 +256,9 @@ async function onRemove() {
           v-for="u in pagedUpstreams"
           :key="u.id"
           :item="u"
-          :busy="checkingId === u.id || checkingAll"
+          :busy="checkingId === u.id || speedTestingId === u.id || checkingAll"
           @check="onCheck(u)"
+          @speed-test="onSpeedTest(u)"
           @edit="openEdit(u)"
           @remove="askRemove(u)"
           @view="openView(u)"

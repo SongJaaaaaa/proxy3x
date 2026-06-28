@@ -10,6 +10,14 @@ export function gb(value: number | null | undefined, digits = 1): string {
   return `${n.toFixed(digits)} GB`
 }
 
+/** 字节/秒转速度展示。0/空表示还没测速。 */
+export function speed(value: number | null | undefined): string {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return '未测速'
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB/s`
+  return `${(n / 1024).toFixed(1)} KB/s`
+}
+
 /**
  * 用量百分比（0-100，封顶 100）。quota<=0 视为未设额度，返回 null。
  * 与后端 usage_percent 语义一致，前端也可本地再算一遍。

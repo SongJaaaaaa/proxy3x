@@ -103,6 +103,15 @@ def gb_from_bytes(value):
         return 0
 
 
+def format_speed(value):
+    value = int(value or 0)
+    if value <= 0:
+        return "未测速"
+    if value >= 1024 * 1024:
+        return f"{value / 1024 / 1024:.2f} MB/s"
+    return f"{value / 1024:.1f} KB/s"
+
+
 def default_expires_at(base=None):
     return int(base or now()) + DEFAULT_PACKAGE_EXPIRE_SECONDS
 
@@ -194,6 +203,8 @@ def init_db():
               status TEXT NOT NULL DEFAULT '未检测',
               last_error TEXT NOT NULL DEFAULT '',
               last_check_at INTEGER NOT NULL DEFAULT 0,
+              speed_bps INTEGER NOT NULL DEFAULT 0,
+              last_speed_at INTEGER NOT NULL DEFAULT 0,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
@@ -254,6 +265,8 @@ def init_db():
               config_json TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT '未检测',
               latency_ms INTEGER NOT NULL DEFAULT 0,
+              speed_bps INTEGER NOT NULL DEFAULT 0,
+              last_speed_at INTEGER NOT NULL DEFAULT 0,
               last_error TEXT NOT NULL DEFAULT '',
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
@@ -270,6 +283,8 @@ def init_db():
               quota_gb REAL NOT NULL DEFAULT 0,
               upload_bytes INTEGER NOT NULL DEFAULT 0,
               download_bytes INTEGER NOT NULL DEFAULT 0,
+              speed_bps INTEGER NOT NULL DEFAULT 0,
+              last_speed_at INTEGER NOT NULL DEFAULT 0,
               enabled INTEGER NOT NULL DEFAULT 1,
               expires_at INTEGER NOT NULL DEFAULT 0,
               remark TEXT NOT NULL DEFAULT '',
@@ -330,6 +345,10 @@ def init_db():
             con.execute("ALTER TABLE upstreams ADD COLUMN quota_gb REAL NOT NULL DEFAULT 0")
         if "expires_at" not in upstream_columns:
             con.execute("ALTER TABLE upstreams ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0")
+        if "speed_bps" not in upstream_columns:
+            con.execute("ALTER TABLE upstreams ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
+        if "last_speed_at" not in upstream_columns:
+            con.execute("ALTER TABLE upstreams ADD COLUMN last_speed_at INTEGER NOT NULL DEFAULT 0")
         con.execute(
             """
             UPDATE upstreams
@@ -338,6 +357,16 @@ def init_db():
             """,
             (default_upstream_expires_at(),),
         )
+        node_columns = {row["name"] for row in con.execute("PRAGMA table_info(socks_nodes)").fetchall()}
+        if "speed_bps" not in node_columns:
+            con.execute("ALTER TABLE socks_nodes ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
+        if "last_speed_at" not in node_columns:
+            con.execute("ALTER TABLE socks_nodes ADD COLUMN last_speed_at INTEGER NOT NULL DEFAULT 0")
+        endpoint_columns = {row["name"] for row in con.execute("PRAGMA table_info(socks_endpoints)").fetchall()}
+        if "speed_bps" not in endpoint_columns:
+            con.execute("ALTER TABLE socks_endpoints ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
+        if "last_speed_at" not in endpoint_columns:
+            con.execute("ALTER TABLE socks_endpoints ADD COLUMN last_speed_at INTEGER NOT NULL DEFAULT 0")
         current = now()
         con.execute(
             """
@@ -2022,6 +2051,193 @@ def test_socks_proxy(upstream):
             raise RuntimeError("连接目标失败")
 
 
+def socks_connect_target(upstream, target_host, target_port, timeout=8):
+    host = target_host.encode()
+    user = (upstream.get("username") or "").encode()
+    pwd = (upstream.get("password") or "").encode()
+    sock = tcp_connect(upstream["host"], upstream["port"], timeout)
+    try:
+        sock.sendall(bytes([5, 2, 0, 2]))
+        method = sock.recv(2)
+        if len(method) != 2 or method[0] != 5:
+            raise RuntimeError("握手失败")
+        if method[1] == 2:
+            sock.sendall(bytes([1, len(user)]) + user + bytes([len(pwd)]) + pwd)
+            auth = sock.recv(2)
+            if len(auth) != 2 or auth[1] != 0:
+                raise RuntimeError("账号验证失败")
+        elif method[1] != 0:
+            raise RuntimeError("不支持的认证方式")
+        sock.sendall(bytes([5, 1, 0, 3, len(host)]) + host + int(target_port).to_bytes(2, "big"))
+        reply = sock.recv(10)
+        if len(reply) < 2 or reply[1] != 0:
+            raise RuntimeError("连接目标失败")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def test_socks_speed(upstream, max_bytes=1024 * 1024, timeout=12):
+    target_host = "speed.cloudflare.com"
+    path = f"/__down?bytes={int(max_bytes)}"
+    body_bytes = 0
+    header_done = False
+    started = time.monotonic()
+    with socks_connect_target(upstream, target_host, 80, timeout) as sock:
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {target_host}\r\n"
+            "User-Agent: proxy3x-speed-test\r\n"
+            "Connection: close\r\n\r\n"
+        )
+        sock.sendall(req.encode("ascii"))
+        while body_bytes < max_bytes:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            if not header_done:
+                marker = chunk.find(b"\r\n\r\n")
+                if marker < 0:
+                    continue
+                header_done = True
+                chunk = chunk[marker + 4 :]
+            body_bytes += len(chunk)
+    elapsed = max(time.monotonic() - started, 0.001)
+    if body_bytes <= 0:
+        raise RuntimeError("测速没有下载到数据")
+    return int(body_bytes / elapsed)
+
+
+def endpoint_speed_upstream(row):
+    return {
+        "protocol": "socks",
+        "host": "127.0.0.1",
+        "port": int(row["listen_port"]),
+        "username": row["username"],
+        "password": row["password"],
+    }
+
+
+def speed_test_socks_endpoint(endpoint_id):
+    current = now()
+    with connect_manager_db() as con:
+        row = con.execute(
+            """
+            SELECT e.*, s.enabled AS source_enabled, n.id AS node_id, n.name AS node_name
+            FROM socks_endpoints e
+            JOIN socks_sources s ON s.id = e.source_id
+            JOIN socks_nodes n ON n.id = e.node_id
+            WHERE e.id = ?
+            """,
+            (endpoint_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("SOCKS5 不存在")
+        if not row["enabled"] or not row["source_enabled"] or endpoint_expired(row, current):
+            raise ValueError("SOCKS5 未启用或已到期")
+        try:
+            speed = test_socks_speed(endpoint_speed_upstream(row))
+            con.execute(
+                """
+                UPDATE socks_endpoints
+                SET speed_bps = ?, last_speed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (speed, current, current, endpoint_id),
+            )
+            con.execute(
+                """
+                UPDATE socks_nodes
+                SET status = '可用', speed_bps = ?, last_speed_at = ?, last_error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (speed, current, current, row["node_id"]),
+            )
+            return speed
+        except Exception as exc:
+            con.execute(
+                """
+                UPDATE socks_endpoints
+                SET speed_bps = 0, last_speed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (current, current, endpoint_id),
+            )
+            con.execute(
+                """
+                UPDATE socks_nodes
+                SET status = '不可用', speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (current, str(exc), current, row["node_id"]),
+            )
+            raise
+
+
+def speed_test_upstream(upstream_id):
+    current = now()
+    with connect_manager_db() as con:
+        row = con.execute("SELECT * FROM upstreams WHERE id = ?", (upstream_id,)).fetchone()
+        if not row:
+            raise ValueError("SOCKS5 不存在")
+        item = dict(row)
+        if upstream_is_expired(item):
+            con.execute(
+                "UPDATE upstreams SET status = '不可用', last_error = 'SOCKS5: 已到期', updated_at = ? WHERE id = ?",
+                (current, upstream_id),
+            )
+            raise ValueError("SOCKS5 已到期")
+        internal = internal_socks_endpoint(item)
+        target = item
+        if internal:
+            target = dict(item)
+            target["host"] = "127.0.0.1"
+        try:
+            speed = test_socks_speed(target)
+            con.execute(
+                """
+                UPDATE upstreams
+                SET status = '可用', last_error = '', speed_bps = ?, last_speed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (speed, current, current, upstream_id),
+            )
+            if internal:
+                con.execute(
+                    """
+                    UPDATE socks_endpoints
+                    SET speed_bps = ?, last_speed_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (speed, current, current, internal["id"]),
+                )
+                con.execute(
+                    """
+                    UPDATE socks_nodes
+                    SET status = '可用', speed_bps = ?, last_speed_at = ?, last_error = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (speed, current, current, internal["node_id"]),
+                )
+            return speed
+        except Exception as exc:
+            con.execute(
+                "UPDATE upstreams SET status = '不可用', last_error = ?, speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
+                (str(exc), current, current, upstream_id),
+            )
+            if internal:
+                con.execute(
+                    "UPDATE socks_endpoints SET speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
+                    (current, current, internal["id"]),
+                )
+                con.execute(
+                    "UPDATE socks_nodes SET status = '不可用', speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                    (current, str(exc), current, internal["node_id"]),
+                )
+            raise
+
+
 def internal_socks_endpoint(upstream):
     try:
         port = int(upstream.get("port") or 0)
@@ -2046,6 +2262,9 @@ def internal_socks_endpoint(upstream):
 def check_upstream(upstream):
     internal = internal_socks_endpoint(upstream)
     if internal:
+        upstream = dict(upstream)
+        upstream["host"] = "127.0.0.1"
+        test_socks_proxy(upstream)
         return "socks", ""
     try:
         test_socks_proxy(upstream)
@@ -3217,7 +3436,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "message": f"已同步 {changed} 个 SOCKS5 用量"})
             return
-        match = re.match(r"^/api/socks-endpoints/(\d+)/(toggle|reveal)$", path)
+        match = re.match(r"^/api/socks-endpoints/(\d+)/(toggle|reveal|speed-test)$", path)
         if match and self.command == "POST":
             endpoint_id = int(match.group(1))
             action = match.group(2)
@@ -3242,8 +3461,15 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("SOCKS5 不存在")
                     self.send_json({"ok": True, "data": endpoint_public(row, node_host(), True)})
                     return
+                if action == "speed-test":
+                    speed = speed_test_socks_endpoint(endpoint_id)
+                    self.send_json({"ok": True, "message": f"测速完成：{format_speed(speed)}", "data": {"speed_bps": speed}})
+                    return
             except ValueError as exc:
                 self.send_json({"ok": False, "message": str(exc)}, 404)
+                return
+            except Exception as exc:
+                self.send_json({"ok": False, "message": f"测速失败：{exc}"}, 200)
                 return
         match = re.match(r"^/api/socks-endpoints/(\d+)$", path)
         if match and self.command == "PUT":
@@ -3418,6 +3644,17 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "message": f"检测失败：{msg}"}, 200)
             if expired:
                 refresh_routes_best_effort("SOCKS5 到期检测")
+            return
+        match = re.match(r"^/api/upstreams/(\d+)/speed-test$", path)
+        if match and self.command == "POST":
+            upstream_id = int(match.group(1))
+            try:
+                speed = speed_test_upstream(upstream_id)
+                self.send_json({"ok": True, "message": f"测速完成：{format_speed(speed)}", "data": {"speed_bps": speed}})
+            except ValueError as exc:
+                self.send_json({"ok": False, "message": str(exc)}, 404)
+            except Exception as exc:
+                self.send_json({"ok": False, "message": f"测速失败：{exc}"}, 200)
             return
         match = re.match(r"^/api/upstreams/(\d+)$", path)
         if match and self.command == "DELETE":
