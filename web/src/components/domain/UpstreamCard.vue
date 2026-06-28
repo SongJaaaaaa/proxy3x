@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { Upstream } from '@/types/dashboard'
 import { fromUnix, gb, latency, speed } from '@/lib/format'
+import { nodeState, stateText, stateTip, stateTone } from '@/lib/nodeStatus'
 import Icon from '@/components/ui/Icon.vue'
 import Badge from '@/components/ui/Badge.vue'
 import ProgressBar from '@/components/ui/ProgressBar.vue'
@@ -17,9 +18,10 @@ const emit = defineEmits<{ check: []; speedTest: []; edit: []; remove: []; view:
 
 const available = computed(() => props.item.status === '可用')
 const failed = computed(() => props.item.status === '不可用')
+const state = computed(() => nodeState(props.item))
 
 const protoTone = computed(() => (props.item.protocol.toLowerCase().includes('socks') ? 'purple' : 'blue'))
-const statusTone = computed(() => (props.item.expired || failed.value ? 'red' : available.value ? 'green' : 'gray'))
+const statusTone = computed(() => stateTone(state.value))
 
 const hasQuota = computed(() => props.item.usage_percent !== null)
 const usageText = computed(() =>
@@ -46,7 +48,9 @@ const expireText = computed(() => props.item.expires_at_text || fromUnix(props.i
       </div>
       <div class="flex flex-col items-end gap-1.5 shrink-0">
         <Badge :tone="protoTone">{{ item.protocol }}</Badge>
-        <Badge :tone="statusTone" dot :pulse="available && !item.expired">{{ item.expired ? '已到期' : item.status }}</Badge>
+        <Badge :tone="statusTone" dot :pulse="available && !item.expired" :title="item.last_error || stateTip(state)">
+          {{ stateText(state) }}
+        </Badge>
       </div>
     </div>
 
@@ -85,6 +89,7 @@ const expireText = computed(() => props.item.expires_at_text || fromUnix(props.i
         延迟 {{ latency(item.latency_ms) }} / 速度 {{ speed(item.speed_bps) }}
       </span>
     </div>
+    <p v-if="item.last_error" class="-mt-2 text-[11px] text-error truncate" :title="item.last_error">{{ item.last_error }}</p>
 
     <!-- 用量进度 -->
     <div class="flex flex-col gap-1.5 mt-2" :class="{ 'opacity-70': dimmed }">

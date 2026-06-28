@@ -42,6 +42,9 @@ from config import (
     DIRECT_OUTBOUND_TAG,
     ENABLE_SING_BOX_STATS,
     ENTERTAINMENT_NODE_NAME,
+    FALLBACK_AUTO,
+    FALLBACK_BLOCK,
+    FALLBACK_DIRECT,
     FRONTEND_DIR,
     GB,
     INITIAL_CREDENTIALS_PATH,
@@ -227,6 +230,7 @@ def init_db():
               enabled INTEGER NOT NULL DEFAULT 1,
               direct_enabled INTEGER NOT NULL DEFAULT 1,
               residential_enabled INTEGER NOT NULL DEFAULT 1,
+              fallback_policy TEXT NOT NULL DEFAULT 'block',
               expires_at INTEGER NOT NULL DEFAULT 0,
               disabled_reason TEXT NOT NULL DEFAULT '',
               created_at INTEGER NOT NULL,
@@ -321,6 +325,8 @@ def init_db():
             con.execute("ALTER TABLE packages ADD COLUMN direct_node_enabled INTEGER NOT NULL DEFAULT 1")
         if "residential_node_enabled" not in columns:
             con.execute("ALTER TABLE packages ADD COLUMN residential_node_enabled INTEGER NOT NULL DEFAULT 0")
+        if "fallback_policy" not in columns:
+            con.execute(f"ALTER TABLE packages ADD COLUMN fallback_policy TEXT NOT NULL DEFAULT '{FALLBACK_BLOCK}'")
         con.execute(
             """
             UPDATE packages
@@ -1039,6 +1045,7 @@ def update_deployment_manager_metadata():
                 "name": p["name"],
                 "total_gb": p["total_gb"],
                 "residential_gb": p["residential_gb"],
+                "fallback_policy": p["fallback_policy"],
                 "expire": int(p["expires_at"] or 0),
                 "usage_sources": sources,
                 "bindings": bindings,
@@ -1057,6 +1064,7 @@ def update_deployment_manager_metadata():
                 "residential_port": p["residential_port"],
                 "upstream_id": p["upstream_id"],
                 "upstream_ids": [int(row["upstream_id"]) for row in bindings],
+                "fallback_policy": p["fallback_policy"],
             }
         )
     data["proxy3x_manager"] = {
@@ -1651,6 +1659,8 @@ def endpoint_used(row):
 
 def endpoint_public(row, host=None, reveal=False):
     item = dict(row)
+    item["status"] = item.pop("node_status", None) or item.get("status") or "未检测"
+    item["last_error"] = item.pop("node_last_error", None) or item.get("last_error") or ""
     item["used_bytes"] = endpoint_used(item)
     item["used_gb"] = gb_from_bytes(item["used_bytes"])
     item["quota_bytes"] = bytes_from_gb(item["quota_gb"])
@@ -1689,7 +1699,8 @@ def socks_factory_data(source_id=None, base_url=None):
                 endpoint_public(row, host)
                 for row in con.execute(
                     """
-                    SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port
+                    SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port,
+                           n.status AS node_status, n.last_error AS node_last_error
                     FROM socks_endpoints e
                     JOIN socks_nodes n ON n.id = e.node_id
                     WHERE e.source_id = ?
@@ -2163,6 +2174,27 @@ def speed_test_socks_endpoint(endpoint_id):
                 """,
                 (latency, speed, current, current, row["node_id"]),
             )
+            con.execute(
+                """
+                UPDATE upstreams
+                SET status = '可用', last_error = '', latency_ms = ?, speed_bps = ?, last_speed_at = ?, updated_at = ?
+                WHERE host IN (?, ?)
+                  AND port = ?
+                  AND username = ?
+                  AND password = ?
+                """,
+                (
+                    latency,
+                    speed,
+                    current,
+                    current,
+                    node_host(),
+                    "127.0.0.1",
+                    int(row["listen_port"]),
+                    row["username"],
+                    row["password"],
+                ),
+            )
             return latency, speed
         except Exception as exc:
             error = str(exc) or type(exc).__name__
@@ -2181,6 +2213,26 @@ def speed_test_socks_endpoint(endpoint_id):
                 WHERE id = ?
                 """,
                 (current, error, current, row["node_id"]),
+            )
+            con.execute(
+                """
+                UPDATE upstreams
+                SET status = '不可用', last_error = ?, latency_ms = 0, speed_bps = 0, last_speed_at = ?, updated_at = ?
+                WHERE host IN (?, ?)
+                  AND port = ?
+                  AND username = ?
+                  AND password = ?
+                """,
+                (
+                    error,
+                    current,
+                    current,
+                    node_host(),
+                    "127.0.0.1",
+                    int(row["listen_port"]),
+                    row["username"],
+                    row["password"],
+                ),
             )
     raise RuntimeError(error)
 
@@ -2313,6 +2365,35 @@ def block_outbound():
     return {"tag": BLOCK_OUTBOUND_TAG, "protocol": "blackhole", "settings": {}}
 
 
+def normalize_fallback_policy(value):
+    value = (value or FALLBACK_BLOCK).strip().lower()
+    if value in (FALLBACK_BLOCK, FALLBACK_DIRECT, FALLBACK_AUTO):
+        return value
+    return FALLBACK_BLOCK
+
+
+def upstream_runtime_available(row, current=None):
+    current = int(current or now())
+    if not row:
+        return False
+    if row["upstream_expires_at"] and int(row["upstream_expires_at"]) <= current:
+        return False
+    return row["upstream_status"] != "不可用"
+
+
+def fallback_outbound(policy, package_rows, current=None, skip_id=None):
+    policy = normalize_fallback_policy(policy)
+    if policy == FALLBACK_DIRECT:
+        return DIRECT_OUTBOUND_TAG
+    if policy == FALLBACK_AUTO:
+        for row in package_rows:
+            if skip_id and int(row["id"]) == int(skip_id):
+                continue
+            if upstream_runtime_available(row, current):
+                return f"proxy3x-upstream-{int(row['upstream_id'])}"
+    return BLOCK_OUTBOUND_TAG
+
+
 def inbound_tag_map():
     result = {}
     if not CHAIN_DB.exists():
@@ -2378,7 +2459,7 @@ def apply_xray_routes():
         upstreams = con.execute("SELECT * FROM upstreams ORDER BY id").fetchall()
         bindings = con.execute(
             """
-            SELECT b.*, u.expires_at AS upstream_expires_at
+            SELECT b.*, u.expires_at AS upstream_expires_at, u.status AS upstream_status
             FROM package_bindings b
             JOIN upstreams u ON u.id = b.upstream_id
             ORDER BY b.package_id, b.sort_order, b.id
@@ -2389,6 +2470,7 @@ def apply_xray_routes():
     binding_by_package = {}
     for row in bindings:
         binding_by_package.setdefault(int(row["package_id"]), []).append(row)
+    upstream_by_id = {int(row["id"]): row for row in upstreams}
     for p in packages:
         for port in (p["direct_port"], p["residential_port"]):
             if port:
@@ -2433,17 +2515,15 @@ def apply_xray_routes():
             for row in rows:
                 if not row["port"]:
                     continue
-                blocked = (
-                    not p["enabled"]
-                    or not row["enabled"]
-                    or package_is_expired(p, current)
-                    or bool(row["upstream_expires_at"] and int(row["upstream_expires_at"]) <= current)
-                )
+                blocked = not p["enabled"] or not row["enabled"] or package_is_expired(p, current)
+                outbound = f"proxy3x-upstream-{int(row['upstream_id'])}"
+                if not blocked and not upstream_runtime_available(row, current):
+                    outbound = fallback_outbound(p["fallback_policy"], rows, current, row["id"])
                 new_rules.append(
                     {
                         "type": "field",
                         "inboundTag": [tag_by_port.get(int(row["port"]), f"inbound-{int(row['port'])}")],
-                        "outboundTag": BLOCK_OUTBOUND_TAG if blocked else f"proxy3x-upstream-{int(row['upstream_id'])}",
+                        "outboundTag": BLOCK_OUTBOUND_TAG if blocked else outbound,
                     }
                 )
             continue
@@ -2451,11 +2531,22 @@ def apply_xray_routes():
         ports = [port for port in (p["direct_port"], p["residential_port"]) if port]
         if ports:
             blocked = not p["enabled"] or package_is_expired(p, current) or not p["upstream_id"]
+            outbound = f"proxy3x-upstream-{int(p['upstream_id'])}" if p["upstream_id"] else BLOCK_OUTBOUND_TAG
+            upstream = upstream_by_id.get(int(p["upstream_id"] or 0))
+            upstream_unavailable = bool(
+                upstream
+                and (
+                    (upstream["expires_at"] and int(upstream["expires_at"]) <= current)
+                    or upstream["status"] == "不可用"
+                )
+            )
+            if not blocked and upstream_unavailable:
+                outbound = DIRECT_OUTBOUND_TAG if normalize_fallback_policy(p["fallback_policy"]) == FALLBACK_DIRECT else BLOCK_OUTBOUND_TAG
             new_rules.append(
                 {
                     "type": "field",
                     "inboundTag": [tag_by_port.get(int(port), f"inbound-{int(port)}") for port in ports],
-                    "outboundTag": BLOCK_OUTBOUND_TAG if blocked else f"proxy3x-upstream-{int(p['upstream_id'])}",
+                    "outboundTag": BLOCK_OUTBOUND_TAG if blocked else outbound,
                 }
             )
 
@@ -3072,6 +3163,7 @@ def create_package(payload):
     if len(upstreams) != len(upstream_ids):
         raise ValueError("选择的 SOCKS5 不存在")
     notes = payload.get("notes") or ""
+    fallback_policy = normalize_fallback_policy(payload.get("fallback_policy"))
     expires_at = parse_expires_at(payload.get("expires_at"))
     with connect_manager_db() as con:
         if con.execute("SELECT id FROM packages WHERE sub_id = ?", (sub_id,)).fetchone():
@@ -3081,8 +3173,8 @@ def create_package(payload):
             """
             INSERT INTO packages(
               name, sub_id, total_gb, residential_gb, notes, upstream_id,
-              direct_email, direct_port, direct_entry_json, expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              direct_email, direct_port, direct_entry_json, fallback_policy, expires_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -3094,6 +3186,7 @@ def create_package(payload):
                 "",
                 None,
                 "",
+                fallback_policy,
                 expires_at,
                 now(),
                 now(),
@@ -3423,7 +3516,8 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError("订阅源不存在")
                         items = con.execute(
                             """
-                            SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port
+                            SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port,
+                                   n.status AS node_status, n.last_error AS node_last_error
                             FROM socks_endpoints e
                             JOIN socks_nodes n ON n.id = e.node_id
                             WHERE e.source_id = ?
@@ -3462,7 +3556,8 @@ class Handler(BaseHTTPRequestHandler):
                     with connect_manager_db() as con:
                         row = con.execute(
                             """
-                            SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port
+                            SELECT e.*, n.name AS node_name, n.protocol, n.server, n.port AS node_port,
+                                   n.status AS node_status, n.last_error AS node_last_error
                             FROM socks_endpoints e
                             JOIN socks_nodes n ON n.id = e.node_id
                             WHERE e.id = ?
@@ -3475,6 +3570,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if action == "speed-test":
                     latency, speed = speed_test_socks_endpoint(endpoint_id)
+                    refresh_routes_best_effort("订阅 SOCKS5 测速后刷新")
                     self.send_json(
                         {
                             "ok": True,
@@ -3487,6 +3583,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "message": str(exc)}, 404)
                 return
             except Exception as exc:
+                refresh_routes_best_effort("订阅 SOCKS5 测速失败后刷新")
                 self.send_json({"ok": False, "message": f"测速失败：{exc}"}, 200)
                 return
         match = re.match(r"^/api/socks-endpoints/(\d+)$", path)
@@ -3662,12 +3759,15 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "message": f"检测失败：{msg}"}, 200)
             if expired:
                 refresh_routes_best_effort("SOCKS5 到期检测")
+            else:
+                refresh_routes_best_effort("SOCKS5 检测后刷新")
             return
         match = re.match(r"^/api/upstreams/(\d+)/speed-test$", path)
         if match and self.command == "POST":
             upstream_id = int(match.group(1))
             try:
                 latency, speed = speed_test_upstream(upstream_id)
+                refresh_routes_best_effort("SOCKS5 测速后刷新")
                 self.send_json(
                     {
                         "ok": True,
@@ -3678,6 +3778,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self.send_json({"ok": False, "message": str(exc)}, 404)
             except Exception as exc:
+                refresh_routes_best_effort("SOCKS5 测速失败后刷新")
                 self.send_json({"ok": False, "message": f"测速失败：{exc}"}, 200)
             return
         match = re.match(r"^/api/upstreams/(\d+)$", path)
@@ -3736,7 +3837,8 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute(
                     """
                     UPDATE packages
-                    SET name = ?, total_gb = ?, residential_gb = ?, notes = ?, upstream_id = ?, expires_at = ?, updated_at = ?
+                    SET name = ?, total_gb = ?, residential_gb = ?, notes = ?, upstream_id = ?,
+                        fallback_policy = ?, expires_at = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -3745,6 +3847,7 @@ class Handler(BaseHTTPRequestHandler):
                         float(payload.get("residential_gb") or 0),
                         payload.get("notes") or "",
                         int(payload["upstream_id"]) if payload.get("upstream_id") else None,
+                        normalize_fallback_policy(payload.get("fallback_policy")),
                         parse_expires_at(payload.get("expires_at")),
                         now(),
                         package_id,

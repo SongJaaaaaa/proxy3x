@@ -85,6 +85,7 @@ async function onSubmit(payload: {
   total_gb: number
   residential_gb: number
   upstream_ids: number[]
+  fallback_policy: 'block' | 'auto' | 'direct'
   expires_at: string
   notes: string
 }) {
@@ -96,6 +97,7 @@ async function onSubmit(payload: {
         total_gb: payload.total_gb,
         residential_gb: payload.residential_gb,
         upstream_ids: payload.upstream_ids,
+        fallback_policy: payload.fallback_policy,
         expires_at: payload.expires_at || null,
         notes: payload.notes,
       })
@@ -107,6 +109,7 @@ async function onSubmit(payload: {
         total_gb: payload.total_gb,
         residential_gb: payload.residential_gb,
         upstream_ids: payload.upstream_ids,
+        fallback_policy: payload.fallback_policy,
         expires_at: payload.expires_at || null,
         notes: payload.notes,
       })

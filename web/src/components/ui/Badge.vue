@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
  * tone: blue(协议/HTTP) / purple(SOCKS5) / green(可用) / red(不可用) / gray(未检测)
  */
 const props = withDefaults(
-  defineProps<{ tone?: 'blue' | 'purple' | 'green' | 'red' | 'gray'; dot?: boolean; pulse?: boolean }>(),
+  defineProps<{ tone?: 'blue' | 'purple' | 'green' | 'red' | 'gray'; dot?: boolean; pulse?: boolean; title?: string }>(),
   { tone: 'gray', dot: false, pulse: false },
 )
 
@@ -35,7 +35,7 @@ const dotCls = computed(() =>
 </script>
 
 <template>
-  <span :class="wrap">
+  <span :class="wrap" :title="title">
     <span v-if="dot" :class="dotCls"></span>
     <slot />
   </span>

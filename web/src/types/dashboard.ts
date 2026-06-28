@@ -40,6 +40,7 @@ export interface Package {
   residential_port: number | null
   upstream_id: number | null
   upstream_ids: number[]
+  fallback_policy: 'block' | 'auto' | 'direct'
   bindings: PackageBinding[]
   direct_runtime_enabled: boolean
   residential_runtime_enabled: boolean
@@ -123,10 +124,10 @@ export interface SocksNode {
   server: string
   port: number
   status: string
+  last_error: string
   latency_ms: number
   speed_bps: number
   last_speed_at: number
-  last_error: string
   created_at: number
   updated_at: number
 }
@@ -142,6 +143,8 @@ export interface SocksEndpoint {
   quota_bytes: number
   upload_bytes: number
   download_bytes: number
+  status: string
+  last_error: string
   latency_ms: number
   speed_bps: number
   last_speed_at: number
@@ -203,6 +206,7 @@ export interface CreatePackageBody {
   residential_gb: number
   upstream_id?: number | null
   upstream_ids?: number[]
+  fallback_policy?: 'block' | 'auto' | 'direct'
   notes?: string
   expires_at?: string | number | null
 }
@@ -215,6 +219,7 @@ export interface UpdatePackageBody {
   notes?: string
   upstream_id?: number | null
   upstream_ids?: number[]
+  fallback_policy?: 'block' | 'auto' | 'direct'
   expires_at?: string | number | null
 }
 

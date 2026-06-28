@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import type { Package, Upstream } from '@/types/dashboard'
-import { monthsFromNowLocal, unixToLocalInput } from '@/lib/format'
+import { latency, monthsFromNowLocal, speed, unixToLocalInput } from '@/lib/format'
+import { nodeState, stateText, stateTip, stateTone } from '@/lib/nodeStatus'
 import Modal from '@/components/ui/Modal.vue'
 import Field from '@/components/ui/Field.vue'
 import Button from '@/components/ui/Button.vue'
 import Icon from '@/components/ui/Icon.vue'
 import DatePicker from '@/components/ui/DatePicker.vue'
+import Badge from '@/components/ui/Badge.vue'
 
 /**
  * 新增/编辑用户套餐弹框（对应 stitch proxy3x_5）。
@@ -23,6 +25,7 @@ const emit = defineEmits<{
       total_gb: number
       residential_gb: number
       upstream_ids: number[]
+      fallback_policy: 'block' | 'auto' | 'direct'
       expires_at: string
       notes: string
     },
@@ -35,17 +38,17 @@ const form = reactive({
   total_gb: 500,
   residential_gb: 0,
   upstream_ids: [] as number[],
+  fallback_policy: 'block' as 'block' | 'auto' | 'direct',
   expires_at: '',
   notes: '',
 })
 const error = ref('')
 const upstreamKeyword = ref('')
 
-const availableUpstreams = computed(() => props.upstreams.filter((u) => !u.expired && u.status !== '不可用'))
 const filteredUpstreams = computed(() => {
   const k = upstreamKeyword.value.trim().toLowerCase()
-  if (!k) return availableUpstreams.value
-  return availableUpstreams.value.filter((u) =>
+  if (!k) return props.upstreams
+  return props.upstreams.filter((u) =>
     `${u.socks5_name || ''} ${u.source_node_name || ''} ${u.display_name || ''} ${u.remark || ''} ${u.host || ''} ${u.assigned_to || ''}`
       .toLowerCase()
       .includes(k),
@@ -67,6 +70,7 @@ watch(
     form.total_gb = e?.total_gb ?? 500
     form.residential_gb = e?.residential_gb ?? 0
     form.upstream_ids = e?.upstream_ids?.length ? [...e.upstream_ids] : e?.upstream_id ? [e.upstream_id] : []
+    form.fallback_policy = e?.fallback_policy ?? 'block'
     form.notes = e?.notes ?? ''
     upstreamKeyword.value = ''
     // 新增时默认一个月后；编辑时回填已有到期时间（留空 = 永久有效）。
@@ -114,6 +118,7 @@ function submit() {
     total_gb: Number(form.total_gb) || 0,
     residential_gb: Number(form.residential_gb) || 0,
     upstream_ids: form.upstream_ids,
+    fallback_policy: form.fallback_policy,
     expires_at: form.expires_at,
     notes: form.notes.trim(),
   })
@@ -158,6 +163,26 @@ function submit() {
       </Field>
     </div>
 
+    <Field label="故障兜底策略" hint="上游不可用时生效">
+      <div class="grid grid-cols-3 gap-2">
+        <button
+          v-for="opt in [
+            { v: 'block', t: '阻断', d: '不可用就断开' },
+            { v: 'auto', t: '自动切换', d: '切到同套餐可用节点' },
+            { v: 'direct', t: '直连兜底', d: '改走服务器直连' },
+          ]"
+          :key="opt.v"
+          type="button"
+          class="rounded-lg border p-3 text-left transition-colors"
+          :class="form.fallback_policy === opt.v ? 'border-primary bg-primary/10' : 'border-outline-variant/40 bg-surface-container/40 hover:border-primary/40'"
+          @click="form.fallback_policy = opt.v as typeof form.fallback_policy"
+        >
+          <span class="block text-sm text-on-surface">{{ opt.t }}</span>
+          <span class="block mt-1 text-xs text-outline">{{ opt.d }}</span>
+        </button>
+      </div>
+    </Field>
+
     <Field label="绑定 SOCKS5" required>
       <div class="rounded-lg border border-outline-variant/40 bg-surface-container/40 overflow-hidden">
         <div class="flex items-center gap-2 p-2 border-b border-outline-variant/30">
@@ -186,7 +211,20 @@ function submit() {
             <span class="min-w-0 flex-1">
               <span class="block text-sm text-on-surface truncate">SOCKS5：{{ upstreamName(u) }}</span>
               <span class="block text-xs text-on-surface-variant truncate">节点：{{ nodeName(u) }}</span>
-              <span class="block font-code-xs text-[11px] text-outline truncate">#{{ u.id }} · {{ u.protocol }} · {{ u.status }}</span>
+              <span class="mt-1 flex items-center gap-2 flex-wrap">
+                <Badge :tone="stateTone(nodeState(u))" dot :title="u.last_error || stateTip(nodeState(u))">
+                  {{ stateText(nodeState(u)) }}
+                </Badge>
+                <span class="font-code-xs text-[11px] text-outline">
+                  #{{ u.id }} · {{ latency(u.latency_ms) }} / {{ speed(u.speed_bps) }}
+                </span>
+              </span>
+              <span v-if="nodeState(u) === 'unavailable'" class="block mt-1 text-[11px] text-error truncate" :title="u.last_error || '服务器不可用，不建议绑定'">
+                {{ u.last_error || '服务器不可用，不建议绑定' }}
+              </span>
+              <span v-else-if="nodeState(u) === 'untested'" class="block mt-1 text-[11px] text-outline">
+                未测速，建议先测速
+              </span>
             </span>
           </button>
           <div v-if="!filteredUpstreams.length" class="px-3 py-6 text-center text-sm text-outline">没有可选 SOCKS5 节点</div>

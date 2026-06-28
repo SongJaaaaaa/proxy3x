@@ -5,6 +5,7 @@ import { toast } from 'vue-sonner'
 import { useSocksFactoryStore } from '@/stores/socksFactory'
 import { usePolling } from '@/composables/usePolling'
 import { fromUnix, gb, latency, speed } from '@/lib/format'
+import { nodeState, stateLegend, stateText, stateTip, stateTone } from '@/lib/nodeStatus'
 import { ApiError } from '@/api/errors'
 import type { SocksEndpoint } from '@/types/dashboard'
 import AppShell from '@/components/layout/AppShell.vue'
@@ -315,6 +316,18 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
               {{ opt.t }}
             </button>
           </div>
+          <div class="flex items-center gap-2 text-xs text-outline">
+            <span>状态说明</span>
+            <Badge
+              v-for="item in stateLegend"
+              :key="item.state"
+              :tone="stateTone(item.state)"
+              dot
+              :title="stateTip(item.state)"
+            >
+              {{ stateText(item.state) }}
+            </Badge>
+          </div>
           <span class="ml-auto text-sm text-outline">显示 {{ endpoints.length }} / {{ source.endpoints.length }}</span>
         </div>
 
@@ -359,9 +372,12 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
                 </td>
                 <td class="py-3 px-3 text-on-surface-variant">{{ fromUnix(item.expires_at) }}</td>
                 <td class="py-3 px-3">
-                  <Badge :tone="item.enabled && !item.expired ? 'green' : 'gray'" dot>
-                    {{ item.expired ? '到期' : item.enabled ? '启用' : '停用' }}
+                  <Badge :tone="stateTone(nodeState(item))" dot :title="item.last_error || stateTip(nodeState(item))">
+                    {{ stateText(nodeState(item)) }}
                   </Badge>
+                  <p v-if="item.last_error" class="mt-1 text-[11px] text-error truncate max-w-[130px]" :title="item.last_error">
+                    {{ item.last_error }}
+                  </p>
                 </td>
                 <td class="py-3 px-3">
                   <div class="flex items-center justify-end gap-1">

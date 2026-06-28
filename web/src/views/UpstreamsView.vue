@@ -5,9 +5,11 @@ import { useDashboardStore } from '@/stores/dashboard'
 import { usePolling } from '@/composables/usePolling'
 import type { Upstream } from '@/types/dashboard'
 import { ApiError } from '@/api/errors'
+import { stateLegend, stateText, stateTip, stateTone } from '@/lib/nodeStatus'
 import AppShell from '@/components/layout/AppShell.vue'
 import Button from '@/components/ui/Button.vue'
 import Icon from '@/components/ui/Icon.vue'
+import Badge from '@/components/ui/Badge.vue'
 import Pagination from '@/components/ui/Pagination.vue'
 import UpstreamCard from '@/components/domain/UpstreamCard.vue'
 import UpstreamFormDialog from '@/components/domain/dialogs/UpstreamFormDialog.vue'
@@ -288,6 +290,18 @@ async function onRemove() {
       <span class="ml-auto font-label-sm text-label-sm text-outline">
         共 {{ filteredUpstreams.length }} / {{ store.upstreams.length }} 个
       </span>
+    </div>
+    <div class="flex items-center gap-2 text-xs text-outline flex-wrap">
+      <span>状态说明</span>
+      <Badge
+        v-for="item in stateLegend"
+        :key="item.state"
+        :tone="stateTone(item.state)"
+        dot
+        :title="stateTip(item.state)"
+      >
+        {{ stateText(item.state) }}
+      </Badge>
     </div>
 
     <!-- 卡片网格 -->

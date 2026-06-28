@@ -35,6 +35,11 @@ function bindingPorts(pkg: Package) {
   if (pkg.bindings?.length) return pkg.bindings.map((item) => item.port).filter((port): port is number => Boolean(port))
   return [pkg.direct_port, pkg.residential_port].filter((port): port is number => Boolean(port))
 }
+function fallbackText(pkg: Package) {
+  if (pkg.fallback_policy === 'direct') return '兜底：直连'
+  if (pkg.fallback_policy === 'auto') return '兜底：自动切换'
+  return '兜底：阻断'
+}
 async function copy(url: string, label: string) {
   try {
     await navigator.clipboard.writeText(url)
@@ -124,6 +129,7 @@ async function copy(url: string, label: string) {
                   另有 {{ bindingNames(p).length - 2 }} 个节点
                 </span>
                 <span v-if="!bindingNames(p).length" class="text-outline text-sm">未绑定</span>
+                <span class="text-[11px] text-outline">{{ fallbackText(p) }}</span>
               </div>
             </td>
             <!-- 到期时间 -->
