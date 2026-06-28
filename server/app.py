@@ -203,6 +203,7 @@ def init_db():
               status TEXT NOT NULL DEFAULT '未检测',
               last_error TEXT NOT NULL DEFAULT '',
               last_check_at INTEGER NOT NULL DEFAULT 0,
+              latency_ms INTEGER NOT NULL DEFAULT 0,
               speed_bps INTEGER NOT NULL DEFAULT 0,
               last_speed_at INTEGER NOT NULL DEFAULT 0,
               created_at INTEGER NOT NULL,
@@ -283,6 +284,7 @@ def init_db():
               quota_gb REAL NOT NULL DEFAULT 0,
               upload_bytes INTEGER NOT NULL DEFAULT 0,
               download_bytes INTEGER NOT NULL DEFAULT 0,
+              latency_ms INTEGER NOT NULL DEFAULT 0,
               speed_bps INTEGER NOT NULL DEFAULT 0,
               last_speed_at INTEGER NOT NULL DEFAULT 0,
               enabled INTEGER NOT NULL DEFAULT 1,
@@ -349,6 +351,8 @@ def init_db():
             con.execute("ALTER TABLE upstreams ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
         if "last_speed_at" not in upstream_columns:
             con.execute("ALTER TABLE upstreams ADD COLUMN last_speed_at INTEGER NOT NULL DEFAULT 0")
+        if "latency_ms" not in upstream_columns:
+            con.execute("ALTER TABLE upstreams ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0")
         con.execute(
             """
             UPDATE upstreams
@@ -367,6 +371,8 @@ def init_db():
             con.execute("ALTER TABLE socks_endpoints ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
         if "last_speed_at" not in endpoint_columns:
             con.execute("ALTER TABLE socks_endpoints ADD COLUMN last_speed_at INTEGER NOT NULL DEFAULT 0")
+        if "latency_ms" not in endpoint_columns:
+            con.execute("ALTER TABLE socks_endpoints ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0")
         current = now()
         con.execute(
             """
@@ -2085,6 +2091,8 @@ def test_socks_speed(upstream, max_bytes=1024 * 1024, timeout=12):
     header_done = False
     started = time.monotonic()
     with socks_connect_target(upstream, target_host, 80, timeout) as sock:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        download_started = time.monotonic()
         req = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {target_host}\r\n"
@@ -2103,10 +2111,10 @@ def test_socks_speed(upstream, max_bytes=1024 * 1024, timeout=12):
                 header_done = True
                 chunk = chunk[marker + 4 :]
             body_bytes += len(chunk)
-    elapsed = max(time.monotonic() - started, 0.001)
+    elapsed = max(time.monotonic() - download_started, 0.001)
     if body_bytes <= 0:
         raise RuntimeError("测速没有下载到数据")
-    return int(body_bytes / elapsed)
+    return latency_ms, int(body_bytes / elapsed)
 
 
 def endpoint_speed_upstream(row):
@@ -2138,30 +2146,30 @@ def speed_test_socks_endpoint(endpoint_id):
         if not row["enabled"] or not row["source_enabled"] or endpoint_expired(row, current):
             raise ValueError("SOCKS5 未启用或已到期")
         try:
-            speed = test_socks_speed(endpoint_speed_upstream(row))
+            latency, speed = test_socks_speed(endpoint_speed_upstream(row))
             con.execute(
                 """
                 UPDATE socks_endpoints
-                SET speed_bps = ?, last_speed_at = ?, updated_at = ?
+                SET latency_ms = ?, speed_bps = ?, last_speed_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (speed, current, current, endpoint_id),
+                (latency, speed, current, current, endpoint_id),
             )
             con.execute(
                 """
                 UPDATE socks_nodes
-                SET status = '可用', speed_bps = ?, last_speed_at = ?, last_error = '', updated_at = ?
+                SET status = '可用', latency_ms = ?, speed_bps = ?, last_speed_at = ?, last_error = '', updated_at = ?
                 WHERE id = ?
                 """,
-                (speed, current, current, row["node_id"]),
+                (latency, speed, current, current, row["node_id"]),
             )
-            return speed
+            return latency, speed
         except Exception as exc:
             error = str(exc) or type(exc).__name__
             con.execute(
                 """
                 UPDATE socks_endpoints
-                SET speed_bps = 0, last_speed_at = ?, updated_at = ?
+                SET latency_ms = 0, speed_bps = 0, last_speed_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (current, current, endpoint_id),
@@ -2169,7 +2177,7 @@ def speed_test_socks_endpoint(endpoint_id):
             con.execute(
                 """
                 UPDATE socks_nodes
-                SET status = '不可用', speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ?
+                SET status = '不可用', latency_ms = 0, speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (current, error, current, row["node_id"]),
@@ -2197,46 +2205,46 @@ def speed_test_upstream(upstream_id):
             target = dict(item)
             target["host"] = "127.0.0.1"
         try:
-            speed = test_socks_speed(target)
+            latency, speed = test_socks_speed(target)
             con.execute(
                 """
                 UPDATE upstreams
-                SET status = '可用', last_error = '', speed_bps = ?, last_speed_at = ?, updated_at = ?
+                SET status = '可用', last_error = '', latency_ms = ?, speed_bps = ?, last_speed_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (speed, current, current, upstream_id),
+                (latency, speed, current, current, upstream_id),
             )
             if internal:
                 con.execute(
                     """
                     UPDATE socks_endpoints
-                    SET speed_bps = ?, last_speed_at = ?, updated_at = ?
+                    SET latency_ms = ?, speed_bps = ?, last_speed_at = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (speed, current, current, internal["id"]),
+                    (latency, speed, current, current, internal["id"]),
                 )
                 con.execute(
                     """
                     UPDATE socks_nodes
-                    SET status = '可用', speed_bps = ?, last_speed_at = ?, last_error = '', updated_at = ?
+                    SET status = '可用', latency_ms = ?, speed_bps = ?, last_speed_at = ?, last_error = '', updated_at = ?
                     WHERE id = ?
                     """,
-                    (speed, current, current, internal["node_id"]),
+                    (latency, speed, current, current, internal["node_id"]),
                 )
-            return speed
+            return latency, speed
         except Exception as exc:
             error = str(exc) or type(exc).__name__
             con.execute(
-                "UPDATE upstreams SET status = '不可用', last_error = ?, speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE upstreams SET status = '不可用', last_error = ?, latency_ms = 0, speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
                 (error, current, current, upstream_id),
             )
             if internal:
                 con.execute(
-                    "UPDATE socks_endpoints SET speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE socks_endpoints SET latency_ms = 0, speed_bps = 0, last_speed_at = ?, updated_at = ? WHERE id = ?",
                     (current, current, internal["id"]),
                 )
                 con.execute(
-                    "UPDATE socks_nodes SET status = '不可用', speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE socks_nodes SET status = '不可用', latency_ms = 0, speed_bps = 0, last_speed_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
                     (current, error, current, internal["node_id"]),
                 )
     raise RuntimeError(error)
@@ -3466,8 +3474,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "data": endpoint_public(row, node_host(), True)})
                     return
                 if action == "speed-test":
-                    speed = speed_test_socks_endpoint(endpoint_id)
-                    self.send_json({"ok": True, "message": f"测速完成：{format_speed(speed)}", "data": {"speed_bps": speed}})
+                    latency, speed = speed_test_socks_endpoint(endpoint_id)
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": f"测速完成：{latency} ms / {format_speed(speed)}",
+                            "data": {"latency_ms": latency, "speed_bps": speed},
+                        }
+                    )
                     return
             except ValueError as exc:
                 self.send_json({"ok": False, "message": str(exc)}, 404)
@@ -3653,8 +3667,14 @@ class Handler(BaseHTTPRequestHandler):
         if match and self.command == "POST":
             upstream_id = int(match.group(1))
             try:
-                speed = speed_test_upstream(upstream_id)
-                self.send_json({"ok": True, "message": f"测速完成：{format_speed(speed)}", "data": {"speed_bps": speed}})
+                latency, speed = speed_test_upstream(upstream_id)
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": f"测速完成：{latency} ms / {format_speed(speed)}",
+                        "data": {"latency_ms": latency, "speed_bps": speed},
+                    }
+                )
             except ValueError as exc:
                 self.send_json({"ok": False, "message": str(exc)}, 404)
             except Exception as exc:

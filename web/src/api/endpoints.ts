@@ -40,7 +40,7 @@ export const api = {
   revealUpstream: (id: number) => http.get<UpstreamReveal>(`/upstreams/${id}/reveal`),
   updateUpstream: (id: number, body: UpdateUpstreamBody) => http.put(`/upstreams/${id}`, body),
   checkUpstream: (id: number) => http.post(`/upstreams/${id}/check`),
-  speedTestUpstream: (id: number) => http.post<{ speed_bps: number }>(`/upstreams/${id}/speed-test`),
+  speedTestUpstream: (id: number) => http.post<{ latency_ms: number; speed_bps: number }>(`/upstreams/${id}/speed-test`),
   deleteUpstream: (id: number) => http.del(`/upstreams/${id}`),
 
   // —— 订阅 SOCKS 工厂 ——
@@ -56,6 +56,6 @@ export const api = {
   syncSocksUsage: (id: number) => http.post(`/socks-sources/${id}/sync-usage`),
   revealSocksEndpoint: (id: number) => http.post<SocksEndpoint>(`/socks-endpoints/${id}/reveal`),
   toggleSocksEndpoint: (id: number, enabled: boolean) => http.post(`/socks-endpoints/${id}/toggle`, { enabled }),
-  speedTestSocksEndpoint: (id: number) => http.post<{ speed_bps: number }>(`/socks-endpoints/${id}/speed-test`),
+  speedTestSocksEndpoint: (id: number) => http.post<{ latency_ms: number; speed_bps: number }>(`/socks-endpoints/${id}/speed-test`),
   updateSocksEndpoint: (id: number, body: UpdateSocksEndpointBody) => http.put(`/socks-endpoints/${id}`, body),
 }

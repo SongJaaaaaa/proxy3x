@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Upstream } from '@/types/dashboard'
-import { fromUnix, gb, speed } from '@/lib/format'
+import { fromUnix, gb, latency, speed } from '@/lib/format'
 import Icon from '@/components/ui/Icon.vue'
 import Badge from '@/components/ui/Badge.vue'
 import ProgressBar from '@/components/ui/ProgressBar.vue'
@@ -82,7 +82,7 @@ const expireText = computed(() => props.item.expires_at_text || fromUnix(props.i
     >
       <Icon name="speed" :size="16" class="text-outline" />
       <span class="font-code-xs text-code-xs truncate text-on-surface-variant">
-        速度 {{ speed(item.speed_bps) }}
+        延迟 {{ latency(item.latency_ms) }} / 速度 {{ speed(item.speed_bps) }}
       </span>
     </div>
 

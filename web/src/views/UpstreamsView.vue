@@ -61,6 +61,8 @@ const formRef = ref<InstanceType<typeof UpstreamFormDialog> | null>(null)
 const submitting = ref(false)
 const checkingId = ref<number | null>(null)
 const speedTestingId = ref<number | null>(null)
+const speedTestingAll = ref(false)
+const speedProgress = ref({ done: 0, total: 0 })
 
 const confirmOpen = ref(false)
 const removing = ref<Upstream | null>(null)
@@ -167,6 +169,36 @@ async function onSpeedTest(u: Upstream) {
   }
 }
 
+async function onSpeedTestAll() {
+  const list = filteredUpstreams.value.filter((u) => !u.expired)
+  if (!list.length || speedTestingAll.value) return
+  speedTestingAll.value = true
+  speedProgress.value = { done: 0, total: list.length }
+  let ok = 0
+  let fail = 0
+  const concurrency = 3
+  let cursor = 0
+  async function worker() {
+    while (cursor < list.length) {
+      const u = list[cursor++]
+      try {
+        const r = await store.speedTestUpstream(u.id)
+        r.ok ? ok++ : fail++
+      } catch {
+        fail++
+      } finally {
+        speedProgress.value.done++
+      }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, list.length) }, () => worker()))
+    toast.success(`测速完成：可用 ${ok}，失败 ${fail}`)
+  } finally {
+    speedTestingAll.value = false
+  }
+}
+
 function askRemove(u: Upstream) {
   removing.value = u
   confirmOpen.value = true
@@ -192,11 +224,20 @@ async function onRemove() {
       <Button
         variant="ghost"
         :loading="checkingAll"
-        :disabled="!filteredUpstreams.length"
+        :disabled="!filteredUpstreams.length || speedTestingAll"
         @click="onCheckAll"
       >
         <Icon name="network_ping" :size="18" />
         {{ checkingAll ? `检测中 ${checkProgress.done}/${checkProgress.total}` : '一键检测' }}
+      </Button>
+      <Button
+        variant="ghost"
+        :loading="speedTestingAll"
+        :disabled="!filteredUpstreams.length || checkingAll"
+        @click="onSpeedTestAll"
+      >
+        <Icon name="speed" :size="18" />
+        {{ speedTestingAll ? `测速中 ${speedProgress.done}/${speedProgress.total}` : '一键测速' }}
       </Button>
       <Button variant="primary" @click="openCreate">
         <Icon name="add" :size="18" />新增 SOCKS5
@@ -256,7 +297,7 @@ async function onRemove() {
           v-for="u in pagedUpstreams"
           :key="u.id"
           :item="u"
-          :busy="checkingId === u.id || speedTestingId === u.id || checkingAll"
+          :busy="checkingId === u.id || speedTestingId === u.id || checkingAll || speedTestingAll"
           @check="onCheck(u)"
           @speed-test="onSpeedTest(u)"
           @edit="openEdit(u)"

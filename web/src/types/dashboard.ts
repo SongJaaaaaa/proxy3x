@@ -68,6 +68,7 @@ export interface Upstream {
   status: string // 可用 / 不可用 / 未检测
   last_error: string
   last_check_at: number
+  latency_ms: number
   speed_bps: number
   last_speed_at: number
   used_bytes: number
@@ -141,6 +142,7 @@ export interface SocksEndpoint {
   quota_bytes: number
   upload_bytes: number
   download_bytes: number
+  latency_ms: number
   speed_bps: number
   last_speed_at: number
   used_bytes: number

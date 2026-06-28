@@ -18,6 +18,13 @@ export function speed(value: number | null | undefined): string {
   return `${(n / 1024).toFixed(1)} KB/s`
 }
 
+/** 毫秒延迟展示。0/空表示还没测到。 */
+export function latency(value: number | null | undefined): string {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return '未测速'
+  return `${Math.round(n)} ms`
+}
+
 /**
  * 用量百分比（0-100，封顶 100）。quota<=0 视为未设额度，返回 null。
  * 与后端 usage_percent 语义一致，前端也可本地再算一遍。

@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { useSocksFactoryStore } from '@/stores/socksFactory'
 import { usePolling } from '@/composables/usePolling'
-import { fromUnix, gb, speed } from '@/lib/format'
+import { fromUnix, gb, latency, speed } from '@/lib/format'
 import { ApiError } from '@/api/errors'
 import type { SocksEndpoint } from '@/types/dashboard'
 import AppShell from '@/components/layout/AppShell.vue'
@@ -22,6 +22,8 @@ const sourceId = computed(() => Number(route.params.id || 0))
 const keyword = ref('')
 const status = ref<'all' | 'on' | 'off'>('all')
 const busy = ref('')
+const speedAll = ref(false)
+const speedProgress = ref({ done: 0, total: 0 })
 const editOpen = ref(false)
 const editing = ref<SocksEndpoint | null>(null)
 const editRef = ref<InstanceType<typeof SocksEndpointFormDialog> | null>(null)
@@ -157,6 +159,37 @@ async function speedTestOne(item: SocksEndpoint) {
   }
 }
 
+async function speedTestAll() {
+  if (!source.value || speedAll.value) return
+  const list = endpoints.value.filter((e) => e.enabled && !e.expired)
+  if (!list.length) return
+  speedAll.value = true
+  speedProgress.value = { done: 0, total: list.length }
+  let ok = 0
+  let fail = 0
+  const concurrency = 3
+  let cursor = 0
+  async function worker() {
+    while (cursor < list.length) {
+      const item = list[cursor++]
+      try {
+        const r = await store.speedTestEndpoint(item.id, source.value!.id)
+        r.ok ? ok++ : fail++
+      } catch {
+        fail++
+      } finally {
+        speedProgress.value.done++
+      }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, list.length) }, () => worker()))
+    toast.success(`测速完成：可用 ${ok}，失败 ${fail}`)
+  } finally {
+    speedAll.value = false
+  }
+}
+
 function openEdit(item: SocksEndpoint) {
   editing.value = item
   editOpen.value = true
@@ -191,6 +224,10 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
       </Button>
       <Button variant="ghost" :loading="busy === 'sync'" @click="syncUsage">
         <Icon name="data_usage" :size="18" />同步统计
+      </Button>
+      <Button variant="ghost" :loading="speedAll" :disabled="!endpoints.length || Boolean(busy)" @click="speedTestAll">
+        <Icon name="speed" :size="18" />
+        {{ speedAll ? `测速中 ${speedProgress.done}/${speedProgress.total}` : '一键测速' }}
       </Button>
       <Button variant="primary" @click="copyAll">
         <Icon name="content_copy" :size="18" />复制全部
@@ -289,7 +326,7 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
                 <th class="py-3 px-3 w-24">协议</th>
                 <th class="py-3 px-3 w-28">端口</th>
                 <th class="py-3 px-3 w-36">账号</th>
-                <th class="py-3 px-3 w-32">速度</th>
+                <th class="py-3 px-3 w-40">延迟 / 速度</th>
                 <th class="py-3 px-3 w-56">流量</th>
                 <th class="py-3 px-3 w-44">到期</th>
                 <th class="py-3 px-3 w-28">状态</th>
@@ -310,7 +347,7 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
                 <td class="py-3 px-3">
                   <div class="flex items-center gap-1.5 text-on-surface-variant">
                     <Icon name="speed" :size="16" class="text-outline" />
-                    <span class="font-code-xs text-code-xs">{{ speed(item.speed_bps) }}</span>
+                    <span class="font-code-xs text-code-xs">{{ latency(item.latency_ms) }} / {{ speed(item.speed_bps) }}</span>
                   </div>
                 </td>
                 <td class="py-3 px-3">
@@ -336,9 +373,9 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
                     </button>
                     <button class="p-2 rounded hover:bg-surface-variant/30 text-on-surface-variant" title="测速" @click="speedTestOne(item)">
                       <Icon
-                        :name="busy === `speed-${item.id}` ? 'progress_activity' : 'speed'"
+                        :name="busy === `speed-${item.id}` || speedAll ? 'progress_activity' : 'speed'"
                         :size="18"
-                        :class="busy === `speed-${item.id}` ? 'animate-spin' : ''"
+                        :class="busy === `speed-${item.id}` || speedAll ? 'animate-spin' : ''"
                       />
                     </button>
                     <button class="p-2 rounded hover:bg-surface-variant/30 text-on-surface-variant" title="启用/停用" @click="toggleOne(item)">
