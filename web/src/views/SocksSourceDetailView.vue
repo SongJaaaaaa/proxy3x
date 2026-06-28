@@ -3,21 +3,24 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { useSocksFactoryStore } from '@/stores/socksFactory'
+import { useDashboardStore } from '@/stores/dashboard'
 import { usePolling } from '@/composables/usePolling'
 import { fromUnix, gb, latency, speed } from '@/lib/format'
 import { nodeState, stateLegend, stateText, stateTip, stateTone } from '@/lib/nodeStatus'
 import { ApiError } from '@/api/errors'
-import type { SocksEndpoint } from '@/types/dashboard'
+import type { CreateSocksSourceBody, SocksEndpoint } from '@/types/dashboard'
 import AppShell from '@/components/layout/AppShell.vue'
 import Button from '@/components/ui/Button.vue'
 import Icon from '@/components/ui/Icon.vue'
 import Badge from '@/components/ui/Badge.vue'
 import ProgressBar from '@/components/ui/ProgressBar.vue'
 import SocksEndpointFormDialog from '@/components/domain/dialogs/SocksEndpointFormDialog.vue'
+import SocksSourceFormDialog from '@/components/domain/dialogs/SocksSourceFormDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const store = useSocksFactoryStore()
+const dashboard = useDashboardStore()
 const sourceId = computed(() => Number(route.params.id || 0))
 
 const keyword = ref('')
@@ -28,11 +31,14 @@ const speedProgress = ref({ done: 0, total: 0 })
 const editOpen = ref(false)
 const editing = ref<SocksEndpoint | null>(null)
 const editRef = ref<InstanceType<typeof SocksEndpointFormDialog> | null>(null)
+const sourceEditOpen = ref(false)
+const sourceEditRef = ref<InstanceType<typeof SocksSourceFormDialog> | null>(null)
 
 async function load() {
   if (!sourceId.value) return
   try {
     await store.loadSource(sourceId.value)
+    if (!dashboard.upstreams.length) await dashboard.refresh()
   } catch {
     router.push('/socks-sources')
   }
@@ -209,6 +215,21 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
     busy.value = ''
   }
 }
+
+async function submitSource(payload: CreateSocksSourceBody) {
+  if (!source.value) return
+  busy.value = 'source-edit'
+  try {
+    const r = await store.updateSource(source.value.id, payload)
+    toast.success(r.message || '已保存订阅源')
+    sourceEditOpen.value = false
+    await load()
+  } catch (e) {
+    sourceEditRef.value?.setError(e instanceof ApiError ? e.message : '保存失败')
+  } finally {
+    busy.value = ''
+  }
+}
 </script>
 
 <template>
@@ -260,9 +281,14 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
           <p class="text-sm text-on-surface-variant">中转 SOCKS5</p>
           <p class="mt-1 text-on-surface font-medium">{{ source.relay?.name || '不中转，服务器直连订阅节点' }}</p>
         </div>
-        <Badge :tone="source.relay?.id ? (source.relay.status === '可用' ? 'green' : 'red') : 'gray'" dot>
-          {{ source.relay?.id ? source.relay.status : '直连' }}
-        </Badge>
+        <div class="flex items-center gap-2">
+          <Badge :tone="source.relay?.id ? (source.relay.status === '可用' ? 'green' : 'red') : 'gray'" dot>
+            {{ source.relay?.id ? source.relay.status : '直连' }}
+          </Badge>
+          <Button variant="subtle" :loading="busy === 'source-edit'" @click="sourceEditOpen = true">
+            <Icon name="swap_horiz" :size="18" />切换中转
+          </Button>
+        </div>
       </section>
 
       <section class="grid grid-cols-1 xl:grid-cols-[0.8fr_1.2fr] gap-panel-gap">
@@ -437,6 +463,15 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
       :busy="busy === 'edit'"
       @close="editOpen = false"
       @submit="submitEndpoint"
+    />
+    <SocksSourceFormDialog
+      ref="sourceEditRef"
+      :open="sourceEditOpen"
+      :editing="source"
+      :upstreams="dashboard.upstreams"
+      :busy="busy === 'source-edit'"
+      @close="sourceEditOpen = false"
+      @submit="submitSource"
     />
   </AppShell>
 </template>

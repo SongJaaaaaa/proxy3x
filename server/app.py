@@ -2006,6 +2006,8 @@ def parse_statsquery_value(text):
 
 
 def query_sing_box_stat(name):
+    if not ENABLE_SING_BOX_STATS:
+        raise RuntimeError("统计接口未启用")
     try:
         result = subprocess.run(
             [STATSQUERY_BIN, "api", "statsquery", "--server", SING_BOX_API_LISTEN, "-pattern", name],
@@ -2030,11 +2032,16 @@ def sync_socks_usage(source_id=None):
             sql += " WHERE source_id = ?"
             args.append(source_id)
         rows = con.execute(sql, args).fetchall()
+        if not rows:
+            return 0, "没有可同步的 SOCKS5"
         changed = 0
         for row in rows:
             tag = f"socks-in-{int(row['id'])}"
-            up = query_sing_box_stat(f"inbound>>>{tag}>>>traffic>>>uplink")
-            down = query_sing_box_stat(f"inbound>>>{tag}>>>traffic>>>downlink")
+            try:
+                up = query_sing_box_stat(f"inbound>>>{tag}>>>traffic>>>uplink")
+                down = query_sing_box_stat(f"inbound>>>{tag}>>>traffic>>>downlink")
+            except RuntimeError as exc:
+                return changed, str(exc)
             con.execute(
                 """
                 UPDATE socks_endpoints
@@ -2044,7 +2051,7 @@ def sync_socks_usage(source_id=None):
                 (up, down, now(), row["id"]),
             )
             changed += 1
-    return changed
+    return changed, ""
 
 
 def delete_socks_source(source_id):
@@ -3662,11 +3669,12 @@ class Handler(BaseHTTPRequestHandler):
         match = re.match(r"^/api/socks-sources/(\d+)/sync-usage$", path)
         if match and self.command == "POST":
             try:
-                changed = sync_socks_usage(int(match.group(1)))
+                changed, note = sync_socks_usage(int(match.group(1)))
             except Exception as exc:
                 self.send_json({"ok": False, "message": f"同步统计失败：{exc}"}, 500)
                 return
-            self.send_json({"ok": True, "message": f"已同步 {changed} 个 SOCKS5 用量"})
+            message = f"已同步 {changed} 个 SOCKS5 用量" if not note else f"同步统计未更新：{note}"
+            self.send_json({"ok": True, "message": message})
             return
         match = re.match(r"^/api/socks-endpoints/(\d+)/(toggle|reveal|speed-test)$", path)
         if match and self.command == "POST":
