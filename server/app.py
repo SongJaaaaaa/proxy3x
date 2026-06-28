@@ -22,6 +22,7 @@ from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1156,20 +1157,38 @@ def parse_subscription_userinfo(value):
     return info
 
 
+SUBSCRIPTION_USER_AGENTS = (
+    "proxy3x-manager/1.0",
+    "clash.meta",
+    "ClashforWindows/0.20.39",
+    "sing-box 1.10.0",
+)
+
+
 def fetch_subscription(url):
-    req = Request(
-        url,
-        headers={
-            "User-Agent": "proxy3x-manager/1.0",
-            "Accept": "text/plain,text/yaml,application/yaml,*/*",
-        },
-    )
     opener = build_opener(ProxyHandler({}))
-    with opener.open(req, timeout=35) as resp:
-        text = resp.read().decode("utf-8", "replace")
-        userinfo = parse_subscription_userinfo(resp.headers.get("Subscription-Userinfo"))
-        total = int(userinfo.get("total") or 0)
-        return {"text": text, "total_gb": gb_from_bytes(total) if total > 0 else 0}
+    first_error = None
+    for ua in SUBSCRIPTION_USER_AGENTS:
+        req = Request(
+            url,
+            headers={
+                "User-Agent": ua,
+                "Accept": "*/*",
+            },
+        )
+        try:
+            with opener.open(req, timeout=35) as resp:
+                text = resp.read().decode("utf-8", "replace")
+                userinfo = parse_subscription_userinfo(resp.headers.get("Subscription-Userinfo"))
+                total = int(userinfo.get("total") or 0)
+                return {"text": text, "total_gb": gb_from_bytes(total) if total > 0 else 0}
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+    if first_error:
+        raise first_error
+    raise RuntimeError("订阅拉取失败")
 
 
 def fetch_subscription_text(url):
