@@ -167,6 +167,7 @@ export interface SocksSource {
   id: number
   name: string
   url: string
+  relay_upstream_id: number | null
   total_gb: number
   enabled: number
   node_count: number
@@ -180,6 +181,11 @@ export interface SocksSource {
   endpoint_quota_bytes: number
   endpoint_quota_gb: number
   usage_percent: number | null
+  relay: {
+    id: number | null
+    name: string
+    status: string
+  }
   detail_url: string
   nodes: SocksNode[]
   endpoints: SocksEndpoint[]
@@ -188,6 +194,7 @@ export interface SocksSource {
 export interface CreateSocksSourceBody {
   name: string
   url: string
+  relay_upstream_id?: number | null
   total_gb?: number
   expires_at?: string | number | null
 }

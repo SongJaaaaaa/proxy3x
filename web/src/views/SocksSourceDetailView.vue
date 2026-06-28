@@ -255,6 +255,16 @@ async function submitEndpoint(payload: { quota_gb: number; expires_at: string; r
         </div>
       </section>
 
+      <section class="glass-panel rounded-lg p-4 flex items-center justify-between gap-4">
+        <div>
+          <p class="text-sm text-on-surface-variant">中转 SOCKS5</p>
+          <p class="mt-1 text-on-surface font-medium">{{ source.relay?.name || '不中转，服务器直连订阅节点' }}</p>
+        </div>
+        <Badge :tone="source.relay?.id ? (source.relay.status === '可用' ? 'green' : 'red') : 'gray'" dot>
+          {{ source.relay?.id ? source.relay.status : '直连' }}
+        </Badge>
+      </section>
+
       <section class="grid grid-cols-1 xl:grid-cols-[0.8fr_1.2fr] gap-panel-gap">
         <div class="glass-panel rounded-lg p-4 flex flex-col gap-4">
           <div>

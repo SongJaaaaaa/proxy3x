@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { useSocksFactoryStore } from '@/stores/socksFactory'
+import { useDashboardStore } from '@/stores/dashboard'
 import { usePolling } from '@/composables/usePolling'
 import { fromUnix, gb } from '@/lib/format'
 import { ApiError } from '@/api/errors'
@@ -16,8 +17,12 @@ import SocksSourceFormDialog from '@/components/domain/dialogs/SocksSourceFormDi
 import ConfirmDialog from '@/components/domain/dialogs/ConfirmDialog.vue'
 
 const store = useSocksFactoryStore()
+const dashboard = useDashboardStore()
 const router = useRouter()
-usePolling(() => store.refreshList(), 12000)
+usePolling(async () => {
+  await store.refreshList()
+  await dashboard.refresh()
+}, 12000)
 
 const formOpen = ref(false)
 const formRef = ref<InstanceType<typeof SocksSourceFormDialog> | null>(null)
@@ -46,7 +51,7 @@ function openEdit(item: SocksSource) {
   formOpen.value = true
 }
 
-async function submit(payload: { name: string; url: string; expires_at: string }) {
+async function submit(payload: { name: string; url: string; relay_upstream_id: number | null; expires_at: string }) {
   submitting.value = true
   try {
     const r = editing.value ? await store.updateSource(editing.value.id, payload) : await store.createSource(payload)
@@ -181,6 +186,9 @@ async function remove() {
                   <Badge :tone="item.enabled ? 'green' : 'gray'" dot>{{ item.enabled ? '启用' : '停用' }}</Badge>
                 </div>
                 <p class="mt-1 font-code-xs text-[11px] text-outline truncate">{{ item.url }}</p>
+                <p class="mt-1 text-xs text-on-surface-variant truncate">
+                  中转：{{ item.relay?.name || '不中转，服务器直连' }}
+                </p>
               </div>
             </div>
 
@@ -278,6 +286,7 @@ async function remove() {
       ref="formRef"
       :open="formOpen"
       :editing="editing"
+      :upstreams="dashboard.upstreams"
       :busy="submitting"
       @close="formOpen = false"
       @submit="submit"

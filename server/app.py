@@ -249,6 +249,7 @@ def init_db():
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               name TEXT NOT NULL,
               url TEXT NOT NULL,
+              relay_upstream_id INTEGER,
               total_gb REAL NOT NULL DEFAULT 0,
               enabled INTEGER NOT NULL DEFAULT 1,
               node_count INTEGER NOT NULL DEFAULT 0,
@@ -373,6 +374,9 @@ def init_db():
             con.execute("ALTER TABLE socks_nodes ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
         if "last_speed_at" not in node_columns:
             con.execute("ALTER TABLE socks_nodes ADD COLUMN last_speed_at INTEGER NOT NULL DEFAULT 0")
+        source_columns = {row["name"] for row in con.execute("PRAGMA table_info(socks_sources)").fetchall()}
+        if "relay_upstream_id" not in source_columns:
+            con.execute("ALTER TABLE socks_sources ADD COLUMN relay_upstream_id INTEGER")
         endpoint_columns = {row["name"] for row in con.execute("PRAGMA table_info(socks_endpoints)").fetchall()}
         if "speed_bps" not in endpoint_columns:
             con.execute("ALTER TABLE socks_endpoints ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0")
@@ -1560,6 +1564,39 @@ def socks_endpoint_uri(row, host=None):
     return f"socks5://{user}:{pwd}@{host}:{int(row['listen_port'])}"
 
 
+def parse_relay_upstream_id(payload):
+    try:
+        value = int(payload.get("relay_upstream_id") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else None
+
+
+def validate_source_relay(con, relay_id, source_id=None):
+    if not relay_id:
+        return None
+    row = con.execute("SELECT id, host, port, username, password FROM upstreams WHERE id = ?", (int(relay_id),)).fetchone()
+    if not row:
+        raise ValueError("选择的中转 SOCKS5 不存在")
+    same_source = None
+    if source_id:
+        same_source = con.execute(
+            """
+            SELECT e.id
+            FROM socks_endpoints e
+            WHERE e.source_id = ?
+              AND e.listen_port = ?
+              AND e.username = ?
+              AND e.password = ?
+              AND ? IN (?, '127.0.0.1')
+            """,
+            (int(source_id), int(row["port"]), row["username"], row["password"], row["host"], node_host()),
+        ).fetchone()
+    if same_source:
+        raise ValueError("中转 SOCKS5 不能选择当前订阅自己生成的入口")
+    return int(relay_id)
+
+
 def refresh_socks_source(source_id):
     init_db()
     current = now()
@@ -1702,15 +1739,46 @@ def node_public(row):
     return item
 
 
+def source_relay_public(row):
+    if not row or not row.get("relay_upstream_id"):
+        return {"id": None, "name": "", "status": "未设置"}
+    if not row.get("relay_id"):
+        return {"id": int(row["relay_upstream_id"]), "name": "中转已删除", "status": "缺失"}
+    return {
+        "id": int(row["relay_id"]),
+        "name": row["relay_remark"] or row["relay_host"] or "中转 SOCKS5",
+        "status": row["relay_status"] or "未检测",
+    }
+
+
 def socks_factory_data(source_id=None, base_url=None):
     init_db()
     host = node_host()
     with connect_manager_db() as con:
         if source_id:
-            sources = [con.execute("SELECT * FROM socks_sources WHERE id = ?", (source_id,)).fetchone()]
+            sources = [
+                con.execute(
+                    """
+                    SELECT s.*, r.id AS relay_id, r.host AS relay_host,
+                           r.remark AS relay_remark, r.status AS relay_status
+                    FROM socks_sources s
+                    LEFT JOIN upstreams r ON r.id = s.relay_upstream_id
+                    WHERE s.id = ?
+                    """,
+                    (source_id,),
+                ).fetchone()
+            ]
             sources = [row for row in sources if row]
         else:
-            sources = con.execute("SELECT * FROM socks_sources ORDER BY id DESC").fetchall()
+            sources = con.execute(
+                """
+                SELECT s.*, r.id AS relay_id, r.host AS relay_host,
+                       r.remark AS relay_remark, r.status AS relay_status
+                FROM socks_sources s
+                LEFT JOIN upstreams r ON r.id = s.relay_upstream_id
+                ORDER BY s.id DESC
+                """
+            ).fetchall()
         result = []
         for src in sources:
             nodes = [node_public(row) for row in con.execute("SELECT * FROM socks_nodes WHERE source_id = ? ORDER BY id", (src["id"],)).fetchall()]
@@ -1736,6 +1804,7 @@ def socks_factory_data(source_id=None, base_url=None):
             item["endpoint_quota_bytes"] = quota
             item["endpoint_quota_gb"] = gb_from_bytes(quota)
             item["usage_percent"] = round(used / quota * 100, 1) if quota > 0 else None
+            item["relay"] = source_relay_public(item)
             item["detail_url"] = f"{(base_url or '').rstrip('/')}/socks-sources/{src['id']}" if base_url else f"/socks-sources/{src['id']}"
             item["nodes"] = nodes
             item["endpoints"] = endpoints
@@ -1743,9 +1812,22 @@ def socks_factory_data(source_id=None, base_url=None):
     return result
 
 
+def relay_socks_outbound(row):
+    return {
+        "type": "socks",
+        "tag": f"relay-upstream-{int(row['id'])}",
+        "server": row["host"],
+        "server_port": int(row["port"]),
+        "username": row["username"],
+        "password": row["password"],
+    }
+
+
 def sing_box_outbound(row):
     cfg = json.loads(row["config_json"] or "{}")
     cfg["tag"] = f"source-node-{int(row['node_id'])}"
+    if row["relay_id"]:
+        cfg["detour"] = f"relay-upstream-{int(row['relay_id'])}"
     tls = cfg.get("tls")
     if isinstance(tls, dict) and tls.get("enabled"):
         tls.setdefault("insecure", True)
@@ -1757,10 +1839,13 @@ def write_sing_box_config():
     with connect_manager_db() as con:
         rows = con.execute(
             """
-            SELECT e.*, n.config_json, n.name AS node_name
+            SELECT e.*, n.config_json, n.name AS node_name, s.relay_upstream_id,
+                   r.id AS relay_id, r.host AS relay_host, r.port AS relay_port,
+                   r.username AS relay_username, r.password AS relay_password
             FROM socks_endpoints e
             JOIN socks_nodes n ON n.id = e.node_id
             JOIN socks_sources s ON s.id = e.source_id
+            LEFT JOIN upstreams r ON r.id = s.relay_upstream_id
             WHERE e.enabled = 1 AND s.enabled = 1
             ORDER BY e.listen_port
             """
@@ -1787,6 +1872,17 @@ def write_sing_box_config():
             }
         )
         out = sing_box_outbound(row)
+        if row["relay_id"]:
+            relay = {
+                "id": row["relay_id"],
+                "host": row["relay_host"],
+                "port": row["relay_port"],
+                "username": row["relay_username"],
+                "password": row["relay_password"],
+            }
+            relay_out = relay_socks_outbound(relay)
+            if not any(item["tag"] == relay_out["tag"] for item in outbounds):
+                outbounds.append(relay_out)
         outbounds.append(out)
         rules.append({"inbound": [in_tag], "action": "route", "outbound": out_tag})
     cfg = {
@@ -3447,12 +3543,17 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     total_gb = 0
                 with connect_manager_db() as con:
+                    try:
+                        relay_id = validate_source_relay(con, parse_relay_upstream_id(payload))
+                    except ValueError as exc:
+                        self.send_json({"ok": False, "message": str(exc)}, 400)
+                        return
                     cur = con.execute(
                         """
-                        INSERT INTO socks_sources(name, url, total_gb, enabled, created_at, updated_at)
-                        VALUES (?, ?, ?, 1, ?, ?)
+                        INSERT INTO socks_sources(name, url, relay_upstream_id, total_gb, enabled, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, 1, ?, ?)
                         """,
-                        (name, url, total_gb, now(), now()),
+                        (name, url, relay_id, total_gb, now(), now()),
                     )
                     source_id = cur.lastrowid
                 try:
@@ -3479,6 +3580,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not row:
                     self.send_json({"ok": False, "message": "订阅源不存在"}, 404)
                     return
+                try:
+                    relay_id = validate_source_relay(con, parse_relay_upstream_id(payload), source_id)
+                except ValueError as exc:
+                    self.send_json({"ok": False, "message": str(exc)}, 400)
+                    return
                 old = con.execute("SELECT total_gb FROM socks_sources WHERE id = ?", (source_id,)).fetchone()
                 try:
                     total_gb = float(payload.get("total_gb")) if "total_gb" in payload else float(old["total_gb"] or 0)
@@ -3487,11 +3593,12 @@ class Handler(BaseHTTPRequestHandler):
                 con.execute(
                     """
                     UPDATE socks_sources
-                    SET name = ?, url = ?, total_gb = ?, updated_at = ?
+                    SET name = ?, url = ?, relay_upstream_id = ?, total_gb = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    ((payload.get("name") or "").strip(), (payload.get("url") or "").strip(), total_gb, now(), source_id),
+                    ((payload.get("name") or "").strip(), (payload.get("url") or "").strip(), relay_id, total_gb, now(), source_id),
                 )
+            refresh_sing_box("保存订阅源")
             self.send_json({"ok": True, "message": "已保存订阅源"})
             return
         if match and self.command == "DELETE":
@@ -3806,10 +3913,12 @@ class Handler(BaseHTTPRequestHandler):
             with connect_manager_db() as con:
                 con.execute("DELETE FROM upstreams WHERE id = ?", (upstream_id,))
                 con.execute("UPDATE packages SET upstream_id = NULL WHERE upstream_id = ?", (upstream_id,))
+                con.execute("UPDATE socks_sources SET relay_upstream_id = NULL, updated_at = ? WHERE relay_upstream_id = ?", (now(), upstream_id))
             try:
                 generate_subscriptions()
             except OSError as exc:
                 log_event("警告", f"删除 SOCKS5 后刷新订阅失败：{exc}")
+            refresh_sing_box("删除中转 SOCKS5 后刷新")
             refresh_routes_best_effort("删除 SOCKS5 后刷新")
             self.send_json({"ok": True, "message": "已删除 SOCKS5"})
             return
